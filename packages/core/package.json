@@ -1,0 +1,21 @@
+{
+  "name": "@sms/core",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Pure TypeScript domain logic, types, allotment engine, and report insights",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "date-fns": "^4.1.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -1,0 +1,58 @@
+# Supabase local and project configuration
+
+project_id = "smart-mess-system"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[db.pooler]
+enabled = false
+port = 54329
+pool_mode = "transaction"
+default_pool_size = 20
+max_client_conn = 100
+
+[auth]
+enabled = true
+port = 54324
+site_url = "http://localhost:8081"
+additional_redirect_urls = ["https://localhost:8081"]
+jwt_expiry = 3600
+enable_signup = false
+enable_anonymous_sign_ins = false
+enable_manual_linking = false
+
+[auth.email]
+enable_signup = false
+double_confirm_changes = true
+enable_confirmations = true
+secure_password_change = true
+max_frequency = "1s"
+
+[auth.mfa]
+max_enrolled_factors = 10
+
+[auth.mfa.totp]
+enroll_enabled = true
+verify_enabled = true
+
+[auth.password]
+minimum_length = 12
+required_characters = "lower:1,upper:1,digits:1,symbols:1"
+
+[edge_runtime]
+enabled = true
+port = 54328
+inspector_port = 8083
+
+[analytics]
+enabled = false

@@ -1,0 +1,39 @@
+import { ExpoConfig, ConfigContext } from 'expo/config';
+
+export default ({ config }: ConfigContext): ExpoConfig => ({
+  ...config,
+  name: 'Smart Mess System',
+  slug: 'smart-mess-system',
+  version: '1.0.0',
+  orientation: 'portrait',
+  icon: './assets/icon.png',
+  userInterfaceStyle: 'automatic',
+  scheme: 'smartmess',
+  splash: {
+    resizeMode: 'contain',
+    backgroundColor: '#12283F'
+  },
+  assetBundlePatterns: ['**/*'],
+  ios: {
+    supportsTablet: true,
+    bundleIdentifier: 'mil.gov.sms'
+  },
+  android: {
+    adaptiveIcon: {
+      backgroundColor: '#12283F'
+    },
+    package: 'mil.gov.sms'
+  },
+  web: {
+    bundler: 'metro',
+    output: 'single',
+    favicon: './assets/favicon.png'
+  },
+  plugins: [
+    'expo-router',
+    'expo-local-authentication'
+  ],
+  experiments: {
+    typedRoutes: true
+  }
+});
