@@ -12,4 +12,5 @@ web-build/
 .env.local
 .env.*.local
 *.tsbuildinfo
-
+supabase/.temp/
+.temp/
