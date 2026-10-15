@@ -131,6 +131,15 @@ export default function UnlockScreen() {
               Use 160-Bit Master Recovery Code →
             </Text>
           </Pressable>
+
+          <Pressable
+            onPress={() => router.push('/(auth)/sign-in')}
+            style={[styles.recoverLink, { marginTop: spacing.sm }]}
+          >
+            <Text style={[styles.recoverText, { color: colors.muted }]}>
+              Sign In with Account Credentials →
+            </Text>
+          </Pressable>
         </Card>
       </View>
     </View>

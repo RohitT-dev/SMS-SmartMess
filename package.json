@@ -8,6 +8,8 @@
     "lint": "eslint .",
     "seed:dev": "tsx scripts/seed-dev.ts",
     "web": "pnpm --filter app run web",
+    "ios": "pnpm --filter app run ios",
+    "android": "pnpm --filter app run android",
     "start": "pnpm --filter app run start"
   },
   "devDependencies": {
