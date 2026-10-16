@@ -39,6 +39,22 @@ A mission-critical, zero-knowledge encrypted room inventory, allocation, and led
 - **In-Memory Closure**: Unlocked keys live in a module-level JavaScript closure and are wiped to zeroes upon session lock or inactivity timeout.
 - **Immutable Audit Chain**: Advisory-locked SHA-256 hash chaining prevents and detects tampering.
 
+### Server-side hardening (migration 0019)
+A security review of migrations 0014–0018 found five gaps; `0019_security_review_fixes.sql` closes them and `supabase/tests/02_security_fixes.sql` tests each one.
+
+| Gap | Fix |
+|---|---|
+| A clerk with `manage_rooms` could create, edit, delete or close **suites** | `manage_rooms` covers adding/editing non-suite rooms and closing non-suite rooms only. Suites, deletes and suite closures are admin-only, and non-admins cannot see suite closures. |
+| Parallel guesses could beat the **5-tries-per-15-minutes** access-code limit | Attempts are serialized per user with a transaction-scoped advisory lock. |
+| An admin **password alone** could read the code-wrapped team key and brute-force the code offline | `team_key_versions` is readable only from a code-verified session. |
+| An admin **password alone** could change roles, permissions or deactivate users | `set_user_role`, `set_user_permissions` and `deactivate_user` require a code-verified session. |
+| The original `finish_rotation(INT, TEXT, TEXT, JSONB)` could still switch the active key | Revoked; rotation goes through `finish_rotation_with_code()`. |
+
+### Known limits
+- **The access code is shared.** The attempt limit is per user, so someone holding several staff passwords gets 5 guesses on each. A global limit was left out because anyone could then lock every user out on purpose. Use an 8+ digit code and change it when staff leave.
+- **Database dumps are sensitive.** The team key is wrapped under the code, so a dump plus a short code can be brute-forced offline.
+- **Supabase default table privileges** give `authenticated` extra rights such as `TRUNCATE` on some tables. They are not reachable through the app's API, but a later migration should revoke them.
+
 ---
 
 ## 3. Setup Guide
@@ -116,6 +132,15 @@ Public sign-up is disabled, so the first account is created by hand once per dat
 3. Start the app (`pnpm web`), sign in, and set the first access code when asked. That creates the team encryption key.
 4. Invite everyone else from **User Directory** (this needs the `invite-user` edge function deployed).
 
+### Joining an existing project (teammates)
+Someone joining a team that already runs Smart Mess does **not** set up a database. They connect to yours:
+1. Run the installer **without** `--local-db` / `-LocalDb`.
+2. Put the two public values in their `.env`: `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_KEY`. Send them by any private channel. These values are public by design (they are built into the app) and give no access to data on their own.
+3. **Never send `SUPABASE_SERVICE_ROLE_KEY` or the database password.** The service role key bypasses every security rule. Remove it from the file before sharing; if it leaks, rotate it under Project Settings → API.
+4. An Administrator invites them from **User Directory** (needs the `invite-user` edge function deployed) and gives them the current access code separately.
+
+To see anything, each person needs their own account **and** the access code.
+
 ### Run the app
 ```bash
 pnpm web        # browser at http://localhost:8081
@@ -128,6 +153,7 @@ pnpm start      # Expo dev server; scan the QR code with Expo Go
 - **"Missing Supabase URL"** or a blank sign-in: check `.env`, then restart the dev server with `pnpm --filter app exec expo start --web --clear`.
 - **`Docker is not running`**: start Docker Desktop and wait until it says it is running.
 - **Port 54321/54322 in use**: another Supabase stack is running. Stop it with `supabase stop --all`.
+- **Supabase CLI hangs** on "Connecting to remote database": the migration script stops it after `CLI_TIMEOUT` seconds. Retry, or use `scripts/supabase-migrate.sh remote --psql` (see Section 4).
 - **`pnpm db:migrate` on Windows**: it is a bash script; run it from Git Bash, or use the Supabase CLI commands from Section 4 directly.
 
 ---
@@ -172,6 +198,26 @@ supabase functions deploy invite-user    # user invitations
 ```
 Copy the project URL and anon/publishable key from **Project Settings → API** into `.env`.
 
+### Option C: Update a cloud project that is already running
+Migrations must be applied **in order**: a later file can depend on an earlier one (0019 replaces a function 0018 creates).
+1. See what is missing, and whether any migration was applied from the dashboard under a timestamp:
+   ```bash
+   scripts/supabase-migrate.sh pending
+   ```
+2. If it reports timestamp rows, first confirm in the database that those migrations' changes really are live, then renumber them:
+   ```bash
+   scripts/supabase-migrate.sh repair
+   ```
+3. Preview, then apply:
+   ```bash
+   scripts/supabase-migrate.sh remote --dry-run
+   scripts/supabase-migrate.sh remote
+   ```
+   If the CLI hangs while connecting, use the psql path instead: `scripts/supabase-migrate.sh remote --psql --dry-run`, then without `--dry-run`.
+4. Deploy edge functions if they changed: `scripts/supabase-migrate.sh functions`.
+
+Prefer the CLI or this script over pasting SQL into the dashboard: the dashboard records migrations under timestamps, which is what step 2 has to clean up.
+
 ---
 
 ## 4b. Booking Scenario Tests
@@ -189,7 +235,7 @@ Copy the project URL and anon/publishable key from **Project Settings → API** 
 | `pnpm lint` | Run ESLint with `no-console` enforcement |
 | `pnpm web` | Start the Expo Web development server |
 | `pnpm ios` / `pnpm android` | Start on the iOS Simulator / Android emulator |
-| `pnpm db:migrate <local\|remote\|functions\|status>` | Run `scripts/supabase-migrate.sh` |
+| `pnpm db:migrate <local\|remote\|pending\|repair\|functions\|status>` | Run `scripts/supabase-migrate.sh` |
 | `pnpm seed:dev` | Encrypt and seed sample bookings, rooms, and dev accounts |
 | `pnpm --filter app run export:web` | Export optimized static web distribution to `apps/app/dist` |
 
@@ -204,6 +250,22 @@ Copy the project URL and anon/publishable key from **Project Settings → API** 
 - Server-side triggers and RPCs log bookings, guest PII writes/reveals, rooms, closures, profiles and devices.
 
 Administrators review everything under **Audit Trail**.
+
+### Roles and permissions
+There are two roles. **Administrators** can do everything, including suites, user management, access codes and key rotation. **Clerks** get only the permissions an Administrator grants them under **User Directory**:
+
+| Permission | Allows |
+|---|---|
+| `create_booking` | Create bookings |
+| `enter_guest_details` | Enter or backfill guest details |
+| `reveal_guest_pii` | Reveal guest personal details, search by ID |
+| `cancel_booking` | Cancel bookings |
+| `approve_eviction` | Displace lower-priority bookings (MSA over PI/LEAVE/TD, PI over LEAVE/TD) |
+| `view_reports` | Reports and statistics |
+| `deny_request` | Deny LEAVE/TD requests (MSA and PI cannot be denied) |
+| `manage_rooms` | Add and edit rooms, mark rooms out of service, end closures. **Never suites.** |
+
+Suites (VVIP) are admin-only everywhere: booking, editing, closing and viewing closures.
 
 ---
 
