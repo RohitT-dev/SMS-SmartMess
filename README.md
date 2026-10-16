@@ -144,8 +144,15 @@ scripts/supabase-migrate.sh remote --dry-run  # preview migrations for the linke
 scripts/supabase-migrate.sh remote            # push pending migrations (asks for confirmation)
 scripts/supabase-migrate.sh functions         # deploy all edge functions
 scripts/supabase-migrate.sh status            # local vs remote migration list
+scripts/supabase-migrate.sh pending           # local migrations the remote has not recorded
+scripts/supabase-migrate.sh repair            # renumber history rows recorded under dashboard timestamps
+scripts/supabase-migrate.sh remote --psql     # push through psql when the CLI hangs (add --dry-run to preview)
 ```
-Remote commands need `supabase link --project-ref <ref>` once (or `SUPABASE_PROJECT_REF`); `SUPABASE_DB_PASSWORD` is passed through when set.
+Remote commands need `supabase link --project-ref <ref>` once (or `SUPABASE_PROJECT_REF`); `SUPABASE_DB_PASSWORD` is passed through when set. Remote CLI calls stop after `CLI_TIMEOUT` seconds (default 180) instead of hanging.
+
+`pending`, `repair` and `--psql` read the migration history directly. They need `psql` (macOS: `brew install libpq && brew link --force libpq`) and `SUPABASE_DB_URL`, the **Session pooler** connection string from Project Settings → Database. Keep that URL out of any `.env` you share: it contains the database password.
+
+**Migrations applied from the dashboard or an AI tool** are recorded under a timestamp (for example `20261016064640`) instead of the file's number, so a plain push would try to run them again. `pending` flags them and `repair` renumbers them after you confirm. `--psql` refuses to push until that is done, and applies each file in one transaction together with its history row.
 
 ### Option A: Local Supabase (Docker)
 ```bash
