@@ -12,7 +12,7 @@ export interface DailyReportInput {
  * Total: sum of all people across days
  * Daily average: total / numDays (rounded to 1 decimal place)
  * Peak day & count: maximum total across days
- * MSA+PI share: ((sum(MSA) + sum(PI)) / total) * 100 rounded to whole percent
+ * MFA+PI share: ((sum(MFA) + sum(PI)) / total) * 100 rounded to whole percent
  * Peak occupancy: (peakCount / bedsTotal) * 100 rounded to whole percent
  */
 export function reportInsights(
@@ -49,7 +49,7 @@ export function reportInsights(
       dayTotals.set(row.day, currentDay + row.people);
 
       overallTotal += row.people;
-      if (row.category === 'MSA') msaTotal += row.people;
+      if (row.category === 'MFA') msaTotal += row.people;
       if (row.category === 'PI') piTotal += row.people;
     }
   }
@@ -76,7 +76,7 @@ export function reportInsights(
   const writtenInsights: string[] = [
     `Total accommodation volume reached ${overallTotal} guest-days over ${numDays} days, averaging ${dailyAverage.toFixed(1)} personnel per day.`,
     `Peak occupancy occurred on ${peakDay || 'N/A'} with ${peakCount} guests in residence (${peakOccupancyPercentage}% of total ${bedsTotal} beds).`,
-    `Priority categories (BA MSA and Posted In) constituted ${msaPiSharePercentage}% of total guest-days.`
+    `Priority categories (BA MFA and Posted In) constituted ${msaPiSharePercentage}% of total guest-days.`
   ];
 
   if (denialCount > 0) {

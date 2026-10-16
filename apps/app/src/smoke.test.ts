@@ -45,7 +45,7 @@ describe('App Smoke Tests', () => {
   it('3. Booking form blocks submit when guests are missing gender or rank', () => {
     // Attempt to validate booking with guest missing rank
     const invalidRankBooking = {
-      category: 'MSA',
+      category: 'MFA',
       checkIn: '2026-11-01',
       checkOut: '2026-11-05',
       partySize: 1,
@@ -59,7 +59,7 @@ describe('App Smoke Tests', () => {
 
     // Attempt to validate booking with guest missing gender
     const invalidGenderBooking = {
-      category: 'MSA',
+      category: 'MFA',
       checkIn: '2026-11-01',
       checkOut: '2026-11-05',
       partySize: 1,
@@ -73,7 +73,7 @@ describe('App Smoke Tests', () => {
 
     // Valid booking passes
     const validBooking = {
-      category: 'MSA',
+      category: 'MFA',
       checkIn: '2026-11-01',
       checkOut: '2026-11-05',
       partySize: 1,

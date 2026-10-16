@@ -194,7 +194,7 @@ export default function ReportsScreen() {
             />
           </View>
           <Text style={[styles.chartNotice, { color: colors.muted }]}>
-            Stacked breakdown: Navy = MSA • Blue = PI • Green = LEAVE • Orange = TD • Saffron =
+            Stacked breakdown: Navy = MFA • Blue = PI • Green = LEAVE • Orange = TD • Saffron =
             Suite
           </Text>
 
@@ -233,7 +233,7 @@ export default function ReportsScreen() {
                 flex: 1,
                 render: (item: any) => (
                   <Text style={{ color: colors.muted, fontSize: typography.xs }}>
-                    {item.category === 'MSA' || item.category === 'PI'
+                    {item.category === 'MFA' || item.category === 'PI'
                       ? 'Protected - Never Denied'
                       : 'Low Priority - Permitted with Written Reason'}
                   </Text>
@@ -246,7 +246,7 @@ export default function ReportsScreen() {
                 : [
                     { category: 'LEAVE', count: 0 },
                     { category: 'TD', count: 0 },
-                    { category: 'MSA', count: 0 },
+                    { category: 'MFA', count: 0 },
                     { category: 'PI', count: 0 },
                   ]
             }

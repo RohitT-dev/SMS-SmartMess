@@ -91,12 +91,18 @@ export default function AdminDataScreen() {
     null,
   );
   const [endingBusy, setEndingBusy] = useState(false);
+  const [deletingRoom, setDeletingRoom] = useState<RoomRow | null>(null);
+  const [deletingBusy, setDeletingBusy] = useState(false);
 
   // Fetch rooms with their closures
   const { data: rooms, isLoading: roomsLoading } = useQuery<RoomRow[]>({
     queryKey: ['admin_all_rooms'],
     queryFn: async () => {
-      const { data, error } = await supabase.from('rooms').select('*').order('display_order');
+      const { data, error } = await supabase
+        .from('rooms')
+        .select('*')
+        .is('deleted_at', null)
+        .order('display_order');
       if (error) throw error;
       const { data: closureRows, error: closureErr } = await supabase
         .from('room_closures')
@@ -261,6 +267,24 @@ export default function AdminDataScreen() {
     }
   };
 
+  const handleDeleteRoom = async () => {
+    if (!deletingRoom) return;
+    setDeletingBusy(true);
+    try {
+      const { error } = await supabase.rpc('delete_room', { p_room_id: deletingRoom.id });
+      if (error) throw error;
+      logAction('rooms.delete', { entity: 'rooms', entityId: deletingRoom.id });
+      setDeletingRoom(null);
+      setPageError(null);
+      refreshRoomData();
+    } catch (err: unknown) {
+      setDeletingRoom(null);
+      setPageError(userErrorMessage(err, 'Could not delete the room.'));
+    } finally {
+      setDeletingBusy(false);
+    }
+  };
+
   const roomStatus = (r: RoomRow) => {
     const active = r.closures.find((c) => c.from <= today && today < c.to);
     if (!r.is_active) return { label: 'Offline', variant: 'default' as const };
@@ -361,6 +385,15 @@ export default function AdminDataScreen() {
                     onPress={() => openClosureDialog(r.id)}
                     style={{ marginTop: spacing.sm }}
                   />
+                  {isAdmin && (
+                    <Button
+                      label="Delete Room"
+                      variant="destructive"
+                      accessibilityLabel={`Delete room ${r.name}`}
+                      onPress={() => setDeletingRoom(r)}
+                      style={{ marginTop: spacing.sm }}
+                    />
+                  )}
                 </Card>
               );
             })}
@@ -403,13 +436,23 @@ export default function AdminDataScreen() {
                 {
                   key: 'actions',
                   header: 'Actions',
-                  width: 190,
+                  width: isAdmin ? 340 : 190,
                   render: (r: RoomRow) => (
-                    <Button
-                      label="Mark Out of Service"
-                      variant="secondary"
-                      onPress={() => openClosureDialog(r.id)}
-                    />
+                    <View style={{ flexDirection: 'row', gap: spacing.xs }}>
+                      <Button
+                        label="Mark Out of Service"
+                        variant="secondary"
+                        onPress={() => openClosureDialog(r.id)}
+                      />
+                      {isAdmin && (
+                        <Button
+                          label="Delete"
+                          variant="destructive"
+                          accessibilityLabel={`Delete room ${r.name}`}
+                          onPress={() => setDeletingRoom(r)}
+                        />
+                      )}
+                    </View>
                   ),
                 },
               ]}
@@ -512,6 +555,18 @@ export default function AdminDataScreen() {
 
           {closureError && <Banner type="error" message={closureError} />}
         </Dialog>
+
+        {/* Delete room confirmation */}
+        <Dialog
+          visible={!!deletingRoom}
+          title={`Delete ${deletingRoom?.name ?? 'room'}?`}
+          message="The room is removed from inventory and can no longer be booked. Past bookings keep their history. Rooms with current or upcoming bookings cannot be deleted."
+          confirmLabel="Delete Room"
+          confirmVariant="destructive"
+          onConfirm={handleDeleteRoom}
+          onCancel={() => setDeletingRoom(null)}
+          loading={deletingBusy}
+        />
 
         {/* End closure confirmation */}
         <Dialog

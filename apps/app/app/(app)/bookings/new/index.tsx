@@ -60,7 +60,7 @@ export default function NewBookingScreen() {
   }, [draft]);
 
   const today = localDateString();
-  const [category, setCategory] = useState<Category>(restored?.category ?? 'MSA');
+  const [category, setCategory] = useState<Category>(restored?.category ?? 'MFA');
   const [checkIn, setCheckIn] = useState<string>(
     initialCheckIn && isValidDateString(initialCheckIn) ? initialCheckIn : today,
   );
@@ -219,14 +219,14 @@ export default function NewBookingScreen() {
             value={category}
             onChange={(val: string) => setCategory(val as Category)}
             options={[
-              { label: 'MSA · BA MSA', value: 'MSA' },
+              { label: 'MFA · BA MFA', value: 'MFA' },
               { label: 'PI · Posted In', value: 'PI' },
               { label: 'LEAVE · On Leave', value: 'LEAVE' },
               { label: 'TD · Temp. Displacement', value: 'TD' },
             ]}
           />
           <Text style={[styles.helpText, { color: colors.muted, marginTop: -spacing.sm }]}>
-            {category === 'MSA' &&
+            {category === 'MFA' &&
               'Highest priority, free of charge. Can displace PI, LEAVE and TD bookings.'}
             {category === 'PI' &&
               'High priority, free of charge. Can displace LEAVE and TD bookings.'}
@@ -391,13 +391,13 @@ export default function NewBookingScreen() {
                 }
               />
               <Text style={[styles.summaryText, { color: colors.text }]}>
-                {category === 'MSA' || category === 'PI'
+                {category === 'MFA' || category === 'PI'
                   ? 'This category has priority: you can review lower-priority bookings for displacement.'
                   : 'You can offer other dates or deny the request with a recorded reason.'}
               </Text>
               <Button
                 label={
-                  category === 'MSA' || category === 'PI'
+                  category === 'MFA' || category === 'PI'
                     ? 'See Dates & Eviction Options'
                     : 'See Alternate Dates & Options'
                 }

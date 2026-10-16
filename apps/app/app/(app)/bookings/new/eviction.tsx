@@ -46,7 +46,7 @@ export default function EvictionReviewScreen() {
     parsed = null;
   }
   const { category, checkIn, checkOut, guests } = parsed || {
-    category: 'MSA' as Category,
+    category: 'MFA' as Category,
     checkIn: '',
     checkOut: '',
     guests: [],
@@ -227,7 +227,7 @@ export default function EvictionReviewScreen() {
           </Text>
           <Text style={[styles.subtitle, { color: colors.muted }]}>
             Tap beds to displace. The first selected bed goes to guest 1, the second to guest 2, and so on.
-            MSA can displace PI/LEAVE/TD; PI can displace LEAVE/TD. Suites are excluded.
+            MFA can displace PI/LEAVE/TD; PI can displace LEAVE/TD. Suites are excluded.
           </Text>
 
           {isLoading ? (

@@ -32,7 +32,7 @@ export const ChartSvg: React.FC<ChartSvgProps> = ({
     if (row.roomType === 'SUITE') {
       dayEntry.suite += row.people;
     } else {
-      if (row.category === 'MSA') dayEntry.msa += row.people;
+      if (row.category === 'MFA') dayEntry.msa += row.people;
       if (row.category === 'PI') dayEntry.pi += row.people;
       if (row.category === 'LEAVE') dayEntry.leave += row.people;
       if (row.category === 'TD') dayEntry.td += row.people;

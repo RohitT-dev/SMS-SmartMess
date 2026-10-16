@@ -4,7 +4,7 @@
 
 export const STAY_BOUNDS = '[)';
 
-export type VisitorCategory = 'MSA' | 'PI' | 'LEAVE' | 'TD';
+export type VisitorCategory = 'MFA' | 'PI' | 'LEAVE' | 'TD';
 
 export interface CategoryMetadata {
   code: VisitorCategory;
@@ -15,9 +15,9 @@ export interface CategoryMetadata {
 }
 
 export const CATEGORIES: Record<VisitorCategory, CategoryMetadata> = {
-  MSA: {
-    code: 'MSA',
-    name: 'BA MSA',
+  MFA: {
+    code: 'MFA',
+    name: 'BA MFA',
     isFree: true,
     priorityOrder: 1,
     canBeDenied: false

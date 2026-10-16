@@ -25,13 +25,13 @@ export function roomStatus(state: RoomDayState): RoomAvailabilityStatus {
 /**
  * Checks whether category A can displace category B.
  * Rules:
- * - MSA may displace PI, LEAVE, TD.
+ * - MFA may displace PI, LEAVE, TD.
  * - PI may displace LEAVE, TD.
  * - LEAVE and TD never displace anyone.
- * - Nobody displaces MSA.
+ * - Nobody displaces MFA.
  */
 export function canDisplace(incomingCategory: VisitorCategory, existingCategory: VisitorCategory): boolean {
-  if (incomingCategory === 'MSA') {
+  if (incomingCategory === 'MFA') {
     return existingCategory === 'PI' || existingCategory === 'LEAVE' || existingCategory === 'TD';
   }
   if (incomingCategory === 'PI') {

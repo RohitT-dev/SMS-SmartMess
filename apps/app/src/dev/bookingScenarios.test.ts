@@ -60,7 +60,7 @@ const nameOf = (id: string) => Object.entries(roomIds).find(([, v]) => v === id)
 
 async function plan(a: BookArgs): Promise<AllotmentResult> {
   const request = {
-    category: a.category ?? 'MSA',
+    category: a.category ?? 'MFA',
     checkIn: a.checkIn,
     checkOut: a.checkOut,
     guests: a.guests,
@@ -81,7 +81,7 @@ async function plan(a: BookArgs): Promise<AllotmentResult> {
 function bookingPayload(a: BookArgs, allocs: Array<{ guestIndex: number; roomId: string; bedSlot: number }>) {
   return {
     p_booking: {
-      category: a.category ?? 'MSA',
+      category: a.category ?? 'MFA',
       check_in: a.checkIn,
       check_out: a.checkOut,
       party_size: a.guests.length,
@@ -298,12 +298,12 @@ describe('full house: alternates, denial, eviction', () => {
     }
   });
 
-  it('LEAVE/TD can be denied, MSA/PI cannot', async () => {
+  it('LEAVE/TD can be denied, MFA/PI cannot', async () => {
     const ok = await sb.rpc('record_denial', {
       p_category: 'LEAVE', p_check_in: d(0), p_check_out: d(2), p_party_size: 1, p_reason_enc: 'enc', p_key_version: 1, p_id: crypto.randomUUID(),
     });
     expect(ok.error).toBeNull();
-    for (const cat of ['MSA', 'PI']) {
+    for (const cat of ['MFA', 'PI']) {
       const bad = await sb.rpc('record_denial', {
         p_category: cat, p_check_in: d(0), p_check_out: d(2), p_party_size: 1, p_reason_enc: 'enc', p_key_version: 1,
       });
@@ -312,10 +312,10 @@ describe('full house: alternates, denial, eviction', () => {
     }
   });
 
-  it('MSA evicts LEAVE: candidates exclude MSA/PI and the incoming booking takes the freed beds', async () => {
+  it('MFA evicts LEAVE: candidates exclude MFA/PI and the incoming booking takes the freed beds', async () => {
     await fillAllRooms(d(0), d(2), 'LEAVE');
     const { data: cands } = await sb.rpc('eviction_candidates', {
-      p_category: 'MSA', p_check_in: d(0), p_check_out: d(2), p_guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }],
+      p_category: 'MFA', p_check_in: d(0), p_check_out: d(2), p_guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }],
     });
     expect(cands.length).toBe(18);
     expect(cands.every((c: any) => c.category === 'LEAVE')).toBe(true);
@@ -326,7 +326,7 @@ describe('full house: alternates, denial, eviction', () => {
     const ids = cands.filter((c: any) => c.room_id === firstRoom).map((c: any) => c.allocation_id);
     expect(ids.length).toBe(2);
     const { data: newId, error } = await sb.rpc('approve_eviction', {
-      p_incoming: { category: 'MSA', check_in: d(0), check_out: d(2), party_size: 1, guests: [{ seq: 1, gender: 'M', rank_code: 'AVM' }] },
+      p_incoming: { category: 'MFA', check_in: d(0), check_out: d(2), party_size: 1, guests: [{ seq: 1, gender: 'M', rank_code: 'AVM' }] },
       p_evict_allocation_ids: ids,
       p_reason_enc: 'enc:official-duty-reason',
       p_key_version: 1,
@@ -339,8 +339,8 @@ describe('full house: alternates, denial, eviction', () => {
     expect(incoming.allocations).toHaveLength(1);
   });
 
-  it('PI can evict LEAVE/TD only; PI cannot evict PI or MSA', async () => {
-    await book({ category: 'MSA', checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO'), G('M', 'FO')], pref: 'VIP' });
+  it('PI can evict LEAVE/TD only; PI cannot evict PI or MFA', async () => {
+    await book({ category: 'MFA', checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO'), G('M', 'FO')], pref: 'VIP' });
     await book({ category: 'PI', checkIn: d(0), checkOut: d(2), guests: [G('M', 'FLT_LT'), G('M', 'FLT_LT')], pref: 'VIP' });
     await book({ category: 'TD', checkIn: d(0), checkOut: d(2), guests: [G('M', 'SQN_LDR'), G('M', 'SQN_LDR')], pref: 'VIP' });
     const { data } = await sb.rpc('eviction_candidates', {
@@ -357,10 +357,10 @@ describe('full house: alternates, denial, eviction', () => {
     // Pair of M/FO in V-01 (LEAVE). Evict only one bed and seat an F guest next to the other.
     await book({ category: 'LEAVE', checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO'), G('M', 'FO')], pref: 'VIP' });
     const { data: cands } = await sb.rpc('eviction_candidates', {
-      p_category: 'MSA', p_check_in: d(0), p_check_out: d(2), p_guests: [{ seq: 1, gender: 'F', rank_code: 'FO' }],
+      p_category: 'MFA', p_check_in: d(0), p_check_out: d(2), p_guests: [{ seq: 1, gender: 'F', rank_code: 'FO' }],
     });
     const res = await sb.rpc('approve_eviction', {
-      p_incoming: { category: 'MSA', check_in: d(0), check_out: d(2), party_size: 1, guests: [{ seq: 1, gender: 'F', rank_code: 'FO' }] },
+      p_incoming: { category: 'MFA', check_in: d(0), check_out: d(2), party_size: 1, guests: [{ seq: 1, gender: 'F', rank_code: 'FO' }] },
       p_evict_allocation_ids: [cands[0].allocation_id],
       p_reason_enc: 'enc:official-duty-reason',
       p_key_version: 1,
@@ -369,7 +369,7 @@ describe('full house: alternates, denial, eviction', () => {
     expect(res.error?.message).toContain('ERR_SHARE_RULE');
     // Atomic: nothing was evicted.
     const after = await sb.rpc('eviction_candidates', {
-      p_category: 'MSA', p_check_in: d(0), p_check_out: d(2), p_guests: [],
+      p_category: 'MFA', p_check_in: d(0), p_check_out: d(2), p_guests: [],
     });
     expect(after.data).toHaveLength(2);
   });
@@ -378,11 +378,11 @@ describe('full house: alternates, denial, eviction', () => {
     // One LEAVE booking of two different people (two rooms). Evict just one of them.
     const party = await book({ category: 'LEAVE', checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO'), G('F', 'FO')], pref: 'VIP' });
     const { data: cands } = await sb.rpc('eviction_candidates', {
-      p_category: 'MSA', p_check_in: d(0), p_check_out: d(2), p_guests: [{ seq: 1, gender: 'M', rank_code: 'WG_CDR' }],
+      p_category: 'MFA', p_check_in: d(0), p_check_out: d(2), p_guests: [{ seq: 1, gender: 'M', rank_code: 'WG_CDR' }],
     });
     const target = cands.find((c: any) => c.occupant_gender === 'M');
     const res = await sb.rpc('approve_eviction', {
-      p_incoming: { category: 'MSA', check_in: d(0), check_out: d(2), party_size: 1, guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }] },
+      p_incoming: { category: 'MFA', check_in: d(0), check_out: d(2), party_size: 1, guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }] },
       p_evict_allocation_ids: [target.allocation_id],
       p_reason_enc: 'enc:official-duty-reason',
       p_key_version: 1,
@@ -397,7 +397,7 @@ describe('full house: alternates, denial, eviction', () => {
   });
 
   it('server refuses to evict a booking the incoming category may not displace', async () => {
-    const msa = await book({ category: 'MSA', checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO')], pref: 'VIP' });
+    const msa = await book({ category: 'MFA', checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO')], pref: 'VIP' });
     const { data: bookingRow } = await (sb.from('bookings') as any).select('*, allocations(*)').eq('id', msa.id).single();
     const res = await sb.rpc('approve_eviction', {
       p_incoming: { category: 'LEAVE', check_in: d(0), check_out: d(2), party_size: 1, guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }] },
@@ -412,11 +412,11 @@ describe('full house: alternates, denial, eviction', () => {
   it('eviction without enough beds for the incoming party is rejected', async () => {
     await book({ category: 'LEAVE', checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO')], pref: 'VIP' });
     const { data: cands } = await sb.rpc('eviction_candidates', {
-      p_category: 'MSA', p_check_in: d(0), p_check_out: d(2), p_guests: [],
+      p_category: 'MFA', p_check_in: d(0), p_check_out: d(2), p_guests: [],
     });
     const res = await sb.rpc('approve_eviction', {
       p_incoming: {
-        category: 'MSA', check_in: d(0), check_out: d(2), party_size: 2,
+        category: 'MFA', check_in: d(0), check_out: d(2), party_size: 2,
         guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }, { seq: 2, gender: 'M', rank_code: 'FO' }],
       },
       p_evict_allocation_ids: [cands[0].allocation_id],
@@ -438,7 +438,7 @@ describe('closures, concurrency, rules', () => {
     expect(r.placements[0].room).toBe('V-02');
 
     const forced = await sb.rpc('create_booking', {
-      p_booking: { category: 'MSA', check_in: d(1), check_out: d(2), party_size: 1, is_suite_booking: false },
+      p_booking: { category: 'MFA', check_in: d(1), check_out: d(2), party_size: 1, is_suite_booking: false },
       p_guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }],
       p_allocations: [{ guest_seq: 1, room_id: roomIds['V-01'], bed_slot: 1 }],
     });
@@ -506,7 +506,7 @@ describe('closures, concurrency, rules', () => {
 
   it('manual placement that breaks the share rule is rejected atomically', async () => {
     const res = await sb.rpc('create_booking', {
-      p_booking: { category: 'MSA', check_in: d(0), check_out: d(1), party_size: 2, is_suite_booking: false },
+      p_booking: { category: 'MFA', check_in: d(0), check_out: d(1), party_size: 2, is_suite_booking: false },
       p_guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }, { seq: 2, gender: 'F', rank_code: 'FO' }],
       p_allocations: [
         { guest_seq: 1, room_id: roomIds['N-01'], bed_slot: 1 },
@@ -518,7 +518,7 @@ describe('closures, concurrency, rules', () => {
   });
 
   it('input validation: party mismatch, bad dates, bad party size, unknown category', async () => {
-    const base = { category: 'MSA', check_in: d(0), check_out: d(1), party_size: 1, is_suite_booking: false };
+    const base = { category: 'MFA', check_in: d(0), check_out: d(1), party_size: 1, is_suite_booking: false };
     const g = [{ seq: 1, gender: 'M', rank_code: 'FO' }];
     const a = [{ guest_seq: 1, room_id: roomIds['N-01'], bed_slot: 1 }];
     expect((await sb.rpc('create_booking', { p_booking: { ...base, party_size: 2 }, p_guests: g, p_allocations: a })).error?.message).toContain('ERR_PARTY_MISMATCH');
@@ -574,7 +574,7 @@ describe('roles and suites', () => {
   it('clerk cannot backdate; admin can', async () => {
     await signInAs('clerk');
     const res = await sb.rpc('create_booking', {
-      p_booking: { category: 'MSA', check_in: d(-3), check_out: d(-1), party_size: 1, is_suite_booking: false },
+      p_booking: { category: 'MFA', check_in: d(-3), check_out: d(-1), party_size: 1, is_suite_booking: false },
       p_guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }],
       p_allocations: [{ guest_seq: 1, room_id: roomIds['N-01'], bed_slot: 1 }],
     });
@@ -582,7 +582,7 @@ describe('roles and suites', () => {
     expect(userErrorMessage(res.error)).toMatch(/Administrator/);
     await signInAs('admin');
     const ok = await sb.rpc('create_booking', {
-      p_booking: { category: 'MSA', check_in: d(-3), check_out: d(-1), party_size: 1, is_suite_booking: false },
+      p_booking: { category: 'MFA', check_in: d(-3), check_out: d(-1), party_size: 1, is_suite_booking: false },
       p_guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }],
       p_allocations: [{ guest_seq: 1, room_id: roomIds['N-01'], bed_slot: 1 }],
     });
@@ -592,7 +592,7 @@ describe('roles and suites', () => {
   it('suite booking: admin only, invisible to clerks, never in clerk room state', async () => {
     await signInAs('clerk');
     const denied = await sb.rpc('create_booking', {
-      p_booking: { category: 'MSA', check_in: d(0), check_out: d(2), party_size: 1, is_suite_booking: true },
+      p_booking: { category: 'MFA', check_in: d(0), check_out: d(2), party_size: 1, is_suite_booking: true },
       p_guests: [{ seq: 1, gender: 'M', rank_code: 'AM' }],
       p_allocations: [{ guest_seq: 1, room_id: roomIds['SU-01'], bed_slot: 1 }],
     });
@@ -600,14 +600,14 @@ describe('roles and suites', () => {
 
     await signInAs('admin');
     const ok = await sb.rpc('create_booking', {
-      p_booking: { category: 'MSA', check_in: d(0), check_out: d(2), party_size: 1, is_suite_booking: true },
+      p_booking: { category: 'MFA', check_in: d(0), check_out: d(2), party_size: 1, is_suite_booking: true },
       p_guests: [{ seq: 1, gender: 'M', rank_code: 'AM' }],
       p_allocations: [{ guest_seq: 1, room_id: roomIds['SU-01'], bed_slot: 1 }],
     });
     expect(ok.error).toBeNull();
     // non-suite booking into the suite room is also refused
     const wrong = await sb.rpc('create_booking', {
-      p_booking: { category: 'MSA', check_in: d(5), check_out: d(6), party_size: 1, is_suite_booking: false },
+      p_booking: { category: 'MFA', check_in: d(5), check_out: d(6), party_size: 1, is_suite_booking: false },
       p_guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }],
       p_allocations: [{ guest_seq: 1, room_id: roomIds['SU-01'], bed_slot: 1 }],
     });
@@ -648,7 +648,7 @@ describe('roles and suites', () => {
   });
 
   it('reports count people per day, category and room type; dashboard counts add up', async () => {
-    await book({ category: 'MSA', checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO'), G('M', 'FO')], pref: 'VIP' });
+    await book({ category: 'MFA', checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO'), G('M', 'FO')], pref: 'VIP' });
     await book({ category: 'LEAVE', checkIn: d(1), checkOut: d(2), guests: [G('F', 'FO')], pref: 'NORMAL' });
     const { data: rep } = await sb.rpc('report_daily', { p_from: d(0), p_to: d(2) });
     const total = rep.reduce((n: number, r: any) => n + r.people, 0);

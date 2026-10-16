@@ -67,7 +67,7 @@ export default function MultiRoomAssignmentScreen() {
   const colors = useThemeStore((s) => s.colors);
 
   const parsed = useMemo(() => parsePayload(payload), [payload]);
-  const category = parsed?.category ?? 'MSA';
+  const category = parsed?.category ?? 'MFA';
   const checkIn = parsed?.checkIn ?? '';
   const checkOut = parsed?.checkOut ?? '';
   const guests = useMemo(() => parsed?.guests ?? [], [parsed]);

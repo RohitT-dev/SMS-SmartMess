@@ -39,7 +39,7 @@ export const ERROR_MAPPINGS: Record<string, AppErrorDetails> = {
   ERR_CANNOT_DENY_PRIORITY: {
     code: 'ERR_CANNOT_DENY_PRIORITY',
     title: 'Priority Request Cannot Be Denied',
-    message: 'BA MSA and Posted In (PI) visitors have mandatory priority and cannot be turned away.',
+    message: 'BA MFA and Posted In (PI) visitors have mandatory priority and cannot be turned away.',
     actionGuidance: 'Initiate the Eviction Review process to displace lower-priority bookings.'
   },
   ERR_INVALID_DATES: {

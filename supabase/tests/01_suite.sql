@@ -71,11 +71,11 @@ SELECT throws_matching(
   'Non-admin caller cannot book a SUITE'
 );
 
--- Test 5: MSA and PI cannot be denied
+-- Test 5: MFA and PI cannot be denied
 SELECT throws_matching(
-  $$ SELECT public.record_denial('MSA', '2026-10-01', '2026-10-05', 1, 'No space', 1) $$,
+  $$ SELECT public.record_denial('MFA', '2026-10-01', '2026-10-05', 1, 'No space', 1) $$,
   'ERR_CANNOT_DENY_PRIORITY',
-  'Denying an MSA request raises ERR_CANNOT_DENY_PRIORITY'
+  'Denying an MFA request raises ERR_CANNOT_DENY_PRIORITY'
 );
 
 SELECT throws_matching(

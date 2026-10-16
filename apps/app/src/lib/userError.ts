@@ -11,6 +11,7 @@ const EXTRA_MESSAGES: Array<[match: string, message: string]> = [
   ['ERR_NOT_ENOUGH_BEDS', 'Select at least one bed for every incoming guest before approving the eviction.'],
   ['ERR_CANNOT_EVICT', 'That booking has equal or higher priority than the incoming request and cannot be displaced.'],
   ['ERR_ROOM_OCCUPIED', 'This room still has active bookings in that period. Cancel or move them first, then mark the room out of service.'],
+  ['ERR_ROOM_HAS_BOOKINGS', 'This room still has current or upcoming bookings. Cancel or move them before deleting the room.'],
   ['ERR_NO_EVICTIONS', 'Select at least one occupant to displace.'],
   ['ERR_ALLOCATION_NOT_ACTIVE', 'One of the selected occupants has already moved or left. Go back and reload the candidate list.'],
   ['ERR_DEVICE_REVOKED', 'This device has been revoked. Contact an Administrator.'],

@@ -30,7 +30,7 @@ const statusVariant = (status: string) =>
         : 'default';
 
 const categoryVariant = (category: string) =>
-  category === 'MSA' ? 'success' : category === 'PI' ? 'warning' : 'default';
+  category === 'MFA' ? 'success' : category === 'PI' ? 'warning' : 'default';
 
 export default function BookingsLedgerScreen() {
   const router = useRouter();
@@ -214,7 +214,7 @@ export default function BookingsLedgerScreen() {
               onChange={setCategoryFilter}
               options={[
                 { label: 'All Categories', value: 'ALL' },
-                { label: 'MSA - BA MSA', value: 'MSA' },
+                { label: 'MFA - BA MFA', value: 'MFA' },
                 { label: 'PI - Posted In', value: 'PI' },
                 { label: 'LEAVE - On Leave', value: 'LEAVE' },
                 { label: 'TD - Displacement', value: 'TD' },
