@@ -541,6 +541,36 @@ describe('closures, concurrency, rules', () => {
 });
 
 describe('roles and suites', () => {
+  it('manage_rooms covers normal rooms and closures but never suites (0019)', async () => {
+    // admin is signed in from beforeEach: grant the clerk room management
+    const grant = await sb.rpc('set_user_permissions', {
+      p_user_id: DEV_USERS.clerk.id,
+      p_permissions: ['create_booking', 'manage_rooms'],
+    });
+    expect(grant.error).toBeNull();
+    const { data: suiteClosure } = await (sb.from('room_closures') as any)
+      .insert({ room_id: roomIds['SU-01'], period: `[${d(30)},${d(32)})` })
+      .select()
+      .single();
+
+    await signInAs('clerk');
+    const normal = await (sb.from('rooms') as any).insert({ room_type: 'NORMAL', name_enc: 'enc:N-09', display_order: 20 });
+    expect(normal.error).toBeNull();
+    const suite = await (sb.from('rooms') as any).insert({ room_type: 'SUITE', name_enc: 'enc:SUITE-09', display_order: 21 });
+    expect(suite.error?.message).toContain('row-level security');
+    expect(userErrorMessage(suite.error)).toMatch(/Administrator/);
+
+    const closeNormal = await (sb.from('room_closures') as any).insert({ room_id: roomIds['N-01'], period: `[${d(30)},${d(31)})` });
+    expect(closeNormal.error).toBeNull();
+    const closeSuite = await (sb.from('room_closures') as any).insert({ room_id: roomIds['SU-01'], period: `[${d(40)},${d(41)})` });
+    expect(closeSuite.error?.message).toContain('row-level security');
+
+    const { data: visible } = await sb.from('room_closures').select('*');
+    expect((visible as any[]).some((c) => c.room_id === roomIds['SU-01'])).toBe(false);
+    const end = await sb.rpc('end_room_closure', { p_closure_id: suiteClosure.id });
+    expect(end.error?.message).toContain('ERR_SUITE_ONLY_ADMIN');
+  });
+
   it('clerk cannot backdate; admin can', async () => {
     await signInAs('clerk');
     const res = await sb.rpc('create_booking', {

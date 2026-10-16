@@ -17,6 +17,8 @@ const EXTRA_MESSAGES: Array<[match: string, message: string]> = [
   ['check_stay_dates', 'Check-out must be after check-in.'],
   ['ERR_INVALID_DATES', 'The selected dates are not valid for this booking.'],
   ['Eviction reason must be', 'The eviction reason must be at least 10 characters.'],
+  ['row-level security policy for table "rooms"', 'Only an Administrator can add or change suites.'],
+  ['row-level security policy for table "room_closures"', 'Only an Administrator can mark a suite out of service.'],
   ['not-null constraint', 'A required field is missing. Check the form and try again.'],
 ];
 

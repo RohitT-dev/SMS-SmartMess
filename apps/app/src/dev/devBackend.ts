@@ -767,6 +767,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       need(isActiveUser() && hasPerm('manage_rooms'));
       const c = db.room_closures.find((x) => x.id === a.p_closure_id);
       if (!c) throw new PgError('ERR_NOT_FOUND');
+      if (!isAdmin() && roomById(c.room_id)?.room_type === 'SUITE') throw new PgError('ERR_SUITE_ONLY_ADMIN');
       const [from, to] = parseRange(c.period);
       const today = todayUtc();
       if (from >= today) db.room_closures = db.room_closures.filter((x) => x.id !== c.id);
@@ -823,6 +824,8 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
         return db.profiles.filter((p) => admin || p.id === uid());
       case 'rooms':
         return db.rooms.filter((r) => r.room_type !== 'SUITE' || admin);
+      case 'room_closures':
+        return db.room_closures.filter((c) => admin || roomById(c.room_id)?.room_type !== 'SUITE');
       case 'devices':
         return db.devices.filter((d) => d.user_id === uid());
       case 'bookings':
@@ -925,14 +928,15 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
         if (this.table !== 'rooms' && this.table !== 'room_closures') {
           throw new PgError(`permission denied for table ${this.table}`, '42501');
         }
-        // rooms_manage_mutation / room_closures_manage policies
-        if (!(isActiveUser() && hasPerm('manage_rooms'))) {
-          throw new PgError(`new row violates row-level security policy for table "${this.table}"`, '42501');
-        }
+        // rooms_manage_insert / room_closures_manage_insert policies (0019): suites stay admin-only.
+        const rlsDenied = () =>
+          new PgError(`new row violates row-level security policy for table "${this.table}"`, '42501');
+        if (!(isActiveUser() && hasPerm('manage_rooms'))) throw rlsDenied();
         const rows = Array.isArray(this.payload) ? this.payload : [this.payload as Row];
         const inserted: Row[] = [];
         for (const r of rows) {
           if (this.table === 'rooms') {
+            if (r.room_type === 'SUITE' && !isAdmin()) throw rlsDenied();
             if (!['VIP', 'SEMI_VIP', 'NORMAL', 'SUITE'].includes(r.room_type)) {
               throw new PgError(`invalid input value for enum room_type: "${r.room_type}"`, '22P02');
             }
@@ -956,6 +960,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
             if (!roomById(r.room_id)) {
               throw new PgError('insert or update on table "room_closures" violates foreign key constraint "room_closures_room_id_fkey"', '23503');
             }
+            if (roomById(r.room_id)?.room_type === 'SUITE' && !isAdmin()) throw rlsDenied();
             const [from, to] = parseRange(r.period);
             if (!(to > from)) throw new PgError('ERR_INVALID_DATES');
             // trg_room_closures_safety (migration 0018)

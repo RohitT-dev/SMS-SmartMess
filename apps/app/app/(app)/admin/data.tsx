@@ -473,7 +473,8 @@ export default function AdminDataScreen() {
               { label: 'Normal Room', value: 'NORMAL' },
               { label: 'Semi VIP Room', value: 'SEMI_VIP' },
               { label: 'VIP Room', value: 'VIP' },
-              { label: 'Executive Suite (AM/VVIP)', value: 'SUITE' },
+              // Suites are admin-only (enforced by RLS in 0019).
+              ...(isAdmin ? [{ label: 'Executive Suite (AM/VVIP)', value: 'SUITE' }] : []),
             ]}
           />
         </Dialog>

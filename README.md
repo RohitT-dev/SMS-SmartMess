@@ -16,9 +16,9 @@ A mission-critical, zero-knowledge encrypted room inventory, allocation, and led
 │   ├── core/                # Pure TS: Deterministic allotment engine, schemas, ranks, reports
 │   └── crypto/              # Pure TS: XChaCha20-Poly1305, Argon2id, X25519, HKDF, blind index
 ├── supabase/
-│   ├── migrations/          # 0001–0018: Constraints, triggers, audit hash chain, RLS, RPCs
+│   ├── migrations/          # 0001–0019: Constraints, triggers, audit hash chain, RLS, RPCs
 │   ├── functions/           # Edge Functions (invite-user)
-│   └── tests/               # Comprehensive pgTAP test suite (01_suite.sql)
+│   └── tests/               # pgTAP suites (01_suite.sql, 02_security_fixes.sql)
 ├── scripts/
 │   ├── install-mac.sh       # One-command macOS installer
 │   ├── install-windows.ps1  # One-command Windows installer (+ .cmd launcher)
@@ -150,7 +150,7 @@ Remote commands need `supabase link --project-ref <ref>` once (or `SUPABASE_PROJ
 ### Option A: Local Supabase (Docker)
 ```bash
 supabase start          # start the local containers (Studio: http://127.0.0.1:54323)
-supabase db reset       # apply all migrations (0001–0018)
+supabase db reset       # apply all migrations (0001–0019)
 supabase test db        # run the pgTAP suite
 supabase status         # print the URL and keys for .env
 ```
@@ -215,6 +215,7 @@ pnpm test
 supabase test db
 ```
 Validates SQL constraints, triggers, RLS policies, audit verification, double-booking exclusion, and last admin safeguards.
+`supabase/tests/02_security_fixes.sql` covers the 0019 fixes: suites stay admin-only under `manage_rooms`, the code-wrapped team key and user administration need a code-verified session, the old rotation RPC is closed, and the attempt limit holds.
 
 ---
 
