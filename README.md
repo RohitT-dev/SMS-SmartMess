@@ -1,6 +1,6 @@
 # Smart Mess System (SMS)
 
-A mission-critical, zero-knowledge encrypted room inventory, allocation, and ledger management system built with **Expo SDK 58** (React Native 0.88, Android target API 36) (Web, iOS, Android) and **Supabase** (PostgreSQL, Row-Level Security, RPC functions, and pgTAP tests).
+A mission-critical, zero-knowledge encrypted room inventory, allocation, and ledger management system built with **Expo SDK 57** (React Native 0.86, Android target API 36) (Web, iOS, Android) and **Supabase** (PostgreSQL, Row-Level Security, RPC functions, and pgTAP tests).
 
 ---
 
@@ -244,7 +244,7 @@ Every upload needs a higher Android version code. Before each release, add or ra
 2. Scan the QR code: with the Camera app on iPhone, or inside Expo Go on Android.
 
 Notes:
-- **SDK versions:** this app uses **Expo SDK 58**. The store versions of Expo Go only run the newest SDK. If Expo Go has moved past SDK 58, use path A or C on iPhone, and on Android install the Expo Go build for SDK 58 from [expo.dev/go](https://expo.dev/go).
+- **SDK versions:** this app uses **Expo SDK 57**. The store versions of Expo Go only run the newest SDK. If Expo Go has moved past SDK 57, use path A or C on iPhone, and on Android install the Expo Go build for SDK 57 from [expo.dev/go](https://expo.dev/go).
 - **Local database:** if `.env` points at a local Supabase (`http://127.0.0.1:54321`), the phone can't reach it. Use your computer's Wi-Fi IP instead (for example `http://192.168.1.20:54321`), or a cloud project.
 
 ### Troubleshooting
