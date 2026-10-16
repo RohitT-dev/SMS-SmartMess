@@ -49,23 +49,23 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
   });
 
   it('Eviction eligibility matrix (all priority combinations)', () => {
-    // MSA can displace PI, LEAVE, TD
-    assert.strictEqual(canDisplace('MSA', 'PI'), true);
-    assert.strictEqual(canDisplace('MSA', 'LEAVE'), true);
-    assert.strictEqual(canDisplace('MSA', 'TD'), true);
-    assert.strictEqual(canDisplace('MSA', 'MSA'), false); // Cannot displace other MSA
+    // MFA can displace PI, LEAVE, TD
+    assert.strictEqual(canDisplace('MFA', 'PI'), true);
+    assert.strictEqual(canDisplace('MFA', 'LEAVE'), true);
+    assert.strictEqual(canDisplace('MFA', 'TD'), true);
+    assert.strictEqual(canDisplace('MFA', 'MFA'), false); // Cannot displace other MFA
 
     // PI can displace LEAVE, TD
     assert.strictEqual(canDisplace('PI', 'LEAVE'), true);
     assert.strictEqual(canDisplace('PI', 'TD'), true);
     assert.strictEqual(canDisplace('PI', 'PI'), false);
-    assert.strictEqual(canDisplace('PI', 'MSA'), false); // Cannot displace MSA
+    assert.strictEqual(canDisplace('PI', 'MFA'), false); // Cannot displace MFA
 
     // LEAVE and TD can NEVER displace anyone
     assert.strictEqual(canDisplace('LEAVE', 'LEAVE'), false);
     assert.strictEqual(canDisplace('LEAVE', 'TD'), false);
     assert.strictEqual(canDisplace('LEAVE', 'PI'), false);
-    assert.strictEqual(canDisplace('LEAVE', 'MSA'), false);
+    assert.strictEqual(canDisplace('LEAVE', 'MFA'), false);
 
     assert.strictEqual(canDisplace('TD', 'TD'), false);
     assert.strictEqual(canDisplace('TD', 'LEAVE'), false);
@@ -170,7 +170,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
     ];
 
     const req: BookingPlanRequest = {
-      category: 'MSA',
+      category: 'MFA',
       checkIn: '2026-10-20',
       checkOut: '2026-10-21',
       guests: [{ gender: 'M', rankCode: 'AIR_CDRE' }],
@@ -231,7 +231,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
     for (let day = 1; day <= 12; day++) {
       const dayStr = `2026-10-${day.toString().padStart(2, '0')}`;
       dailyRows.push(
-        { day: dayStr, category: 'MSA', roomType: 'NORMAL', people: M[day - 1] },
+        { day: dayStr, category: 'MFA', roomType: 'NORMAL', people: M[day - 1] },
         { day: dayStr, category: 'PI', roomType: 'NORMAL', people: P[day - 1] },
         { day: dayStr, category: 'LEAVE', roomType: 'NORMAL', people: L[day - 1] },
         { day: dayStr, category: 'TD', roomType: 'NORMAL', people: T[day - 1] },
@@ -241,7 +241,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
     const bedsTotal = 92;
     const insights = reportInsights(dailyRows, bedsTotal, 0);
 
-    // Expected: total 661, average 55.1, peak 71 on day 10, MSA+PI share 62%, 92 beds, peak occupancy 77%.
+    // Expected: total 661, average 55.1, peak 71 on day 10, MFA+PI share 62%, 92 beds, peak occupancy 77%.
     assert.strictEqual(insights.totalPeopleDays, 661);
     assert.strictEqual(insights.dailyAverage, 55.1);
     assert.strictEqual(insights.peakDay, '2026-10-10'); // Day 10
@@ -279,7 +279,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
   it('Schema validation: DenyRequestSchema blocks priority categories', () => {
     assert.throws(() => {
       DenyRequestSchema.parse({
-        category: 'MSA',
+        category: 'MFA',
         checkIn: '2026-10-01',
         checkOut: '2026-10-02',
         partySize: 1,
@@ -301,7 +301,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
     assert.throws(() => {
       ApproveEvictionSchema.parse({
         incomingBooking: {
-          category: 'MSA',
+          category: 'MFA',
           checkIn: '2026-10-01',
           checkOut: '2026-10-03',
           partySize: 1,

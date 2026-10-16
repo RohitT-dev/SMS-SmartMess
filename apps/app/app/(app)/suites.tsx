@@ -53,6 +53,7 @@ export default function SuitesManagementScreen() {
         .from('rooms')
         .select('*')
         .eq('room_type', 'SUITE')
+        .is('deleted_at', null)
         .order('display_order');
       if (error) throw error;
       const { data: allocs, error: allocErr } = await supabase
@@ -84,7 +85,7 @@ export default function SuitesManagementScreen() {
     try {
       const { data: bookingId, error } = await supabase.rpc('create_booking', {
         p_booking: {
-          category: 'MSA',
+          category: 'MFA',
           check_in: checkIn,
           check_out: checkOut,
           party_size: 1,

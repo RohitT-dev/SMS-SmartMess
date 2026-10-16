@@ -29,7 +29,7 @@ export function buildHtmlReport({
     if (r.roomType === 'SUITE') {
       entry.suite += r.people;
     } else {
-      if (r.category === 'MSA') entry.msa += r.people;
+      if (r.category === 'MFA') entry.msa += r.people;
       if (r.category === 'PI') entry.pi += r.people;
       if (r.category === 'LEAVE') entry.leave += r.people;
       if (r.category === 'TD') entry.td += r.people;
@@ -128,7 +128,7 @@ export function buildHtmlReport({
 
   <div class="section-title">Date vs People Occupancy Chart (Excluding VVIP Suites)</div>
   <div class="legend">
-    <div class="legend-item"><div class="legend-box" style="background:#12283F"></div> BA MSA</div>
+    <div class="legend-item"><div class="legend-box" style="background:#12283F"></div> BA MFA</div>
     <div class="legend-item"><div class="legend-box" style="background:#2F5D8C"></div> Posted In (PI)</div>
     <div class="legend-item"><div class="legend-box" style="background:#138808"></div> Leave</div>
     <div class="legend-item"><div class="legend-box" style="background:#C25E00"></div> Temp Displacement</div>
@@ -151,7 +151,7 @@ export function buildHtmlReport({
     <tbody>
       <tr><td>Leave (LEAVE)</td><td>${denials.find((d) => d.category === 'LEAVE')?.count || 0}</td><td>Low (Eligible for denial)</td></tr>
       <tr><td>Temporary Displacement (TD)</td><td>${denials.find((d) => d.category === 'TD')?.count || 0}</td><td>Low (Eligible for denial)</td></tr>
-      <tr><td>BA MSA (MSA)</td><td>0</td><td>Highest (Mandatory - Never denied)</td></tr>
+      <tr><td>BA MFA (MFA)</td><td>0</td><td>Highest (Mandatory - Never denied)</td></tr>
       <tr><td>Posted In (PI)</td><td>0</td><td>High (Mandatory - Never denied)</td></tr>
     </tbody>
   </table>

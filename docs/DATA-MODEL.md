@@ -69,7 +69,7 @@ Room inventory.
 - `room_closures`: `id`, `room_id`, `period daterange`, `reason_enc`, `created_by`.
 
 ### `bookings` & `booking_guests` & `guest_pii`
-- `bookings`: `id`, `category ('MSA' | 'PI' | 'LEAVE' | 'TD')`, `status ('CONFIRMED' | 'CANCELLED' | 'DISPLACED' | 'COMPLETED')`, `check_in date`, `check_out date`, `stay daterange GENERATED ALWAYS AS (daterange(check_in, check_out, '[)')) STORED`, `party_size int (1..40)`, `is_suite_booking bool`.
+- `bookings`: `id`, `category ('MFA' | 'PI' | 'LEAVE' | 'TD')`, `status ('CONFIRMED' | 'CANCELLED' | 'DISPLACED' | 'COMPLETED')`, `check_in date`, `check_out date`, `stay daterange GENERATED ALWAYS AS (daterange(check_in, check_out, '[)')) STORED`, `party_size int (1..40)`, `is_suite_booking bool`.
 - `booking_guests`: `id`, `booking_id`, `seq int`, `gender ('M' | 'F')`, `rank_code`, `details ('PENDING' | 'COMPLETE')`.
 - `guest_pii`: `guest_id PRIMARY KEY`, `pii_enc text` (encrypted `{ name, idNumber, phone, serviceNumber, unit, notes }`), `id_blind_index text` (`HMAC-SHA256(blindKey, normalize(idNumber))`). **Direct SELECT revoked from all roles; accessible only via `get_guest_pii` RPC with logged audit trail.**
 
@@ -113,7 +113,7 @@ Physical bed assignments.
 | `set_guest_pii` | `enter_guest_details` | Stores encrypted PII & blind index; sets details `COMPLETE`. |
 | `search_guests_by_blind_index` | `reveal_guest_pii` | Audits blind search, returns matching booking IDs. |
 | `approve_eviction` | `approve_eviction` | Atomic displacement of existing booking and creation of incoming booking. |
-| `record_denial` | `deny_request` | Records denial reason. Blocks `MSA`/`PI` with `ERR_CANNOT_DENY_PRIORITY`. |
+| `record_denial` | `deny_request` | Records denial reason. Blocks `MFA`/`PI` with `ERR_CANNOT_DENY_PRIORITY`. |
 | `verify_audit_chain` | `admin` | Cryptographically verifies the unbroken SHA-256 chain. |
 | `daily_room_state` | `is_active_user` | Aggregates room and bed state by date. Filters suites for non-admins. |
 | `dashboard_counts` | `is_active_user` | Live counts of free rooms, partial occupancy, and pending actions. |

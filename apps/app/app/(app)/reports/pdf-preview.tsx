@@ -82,7 +82,7 @@ export default function PdfPreviewScreen() {
               </Text>
             </View>
             <View style={styles.statBox}>
-              <Text style={styles.statLabel}>PRIORITY SHARE (MSA+PI)</Text>
+              <Text style={styles.statLabel}>PRIORITY SHARE (MFA+PI)</Text>
               <Text style={styles.statVal}>{insights.msaPiSharePercentage}%</Text>
             </View>
           </View>

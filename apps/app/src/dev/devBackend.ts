@@ -302,7 +302,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     if (!admin && checkIn < todayUtc()) throw new PgError('ERR_INVALID_DATES: Clerks cannot backdate bookings');
     if (isSuite && !admin) throw new PgError('ERR_SUITE_ONLY_ADMIN');
     if ((pGuests?.length ?? 0) !== partySize) throw new PgError('ERR_PARTY_MISMATCH');
-    if (!['MSA', 'PI', 'LEAVE', 'TD'].includes(category)) {
+    if (!['MFA', 'PI', 'LEAVE', 'TD'].includes(category)) {
       throw new PgError(`invalid input value for enum category: "${category}"`, '22P02');
     }
     if (!(checkOut > checkIn)) {
@@ -613,7 +613,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     eviction_candidates: (a) => {
       need(isActiveUser());
       const range: [string, string] = [a.p_check_in, a.p_check_out];
-      const lower: Record<string, string[]> = { MSA: ['PI', 'LEAVE', 'TD'], PI: ['LEAVE', 'TD'] };
+      const lower: Record<string, string[]> = { MFA: ['PI', 'LEAVE', 'TD'], PI: ['LEAVE', 'TD'] };
       const today = todayUtc();
       return db.allocations
         .filter((al) => {
@@ -659,7 +659,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
 
       const incomingCategory = booking?.category;
       const mayDisplace = (inc: string, existing: string) =>
-        (inc === 'MSA' && ['PI', 'LEAVE', 'TD'].includes(existing)) ||
+        (inc === 'MFA' && ['PI', 'LEAVE', 'TD'].includes(existing)) ||
         (inc === 'PI' && ['LEAVE', 'TD'].includes(existing));
 
       const beds: Row[] = [];
@@ -704,7 +704,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     },
 
     record_denial: (a) => {
-      if (['MSA', 'PI'].includes(a.p_category)) throw new PgError('ERR_CANNOT_DENY_PRIORITY');
+      if (['MFA', 'PI'].includes(a.p_category)) throw new PgError('ERR_CANNOT_DENY_PRIORITY');
       need(isActiveUser() && hasPerm('deny_request'));
       const id = a.p_id ?? randomUUID();
       db.denials.push({
@@ -773,6 +773,27 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       if (from >= today) db.room_closures = db.room_closures.filter((x) => x.id !== c.id);
       else if (to > today) c.period = rangeStr(from, today);
       audit('room_closure_ended', 'room_closures', c.id, { room_id: c.room_id });
+      return null;
+    },
+
+    delete_room: (a) => {
+      need(isAdmin());
+      const room = db.rooms.find((r) => r.id === a.p_room_id && !r.deleted_at);
+      if (!room) throw new PgError('ERR_NOT_FOUND');
+      const today = todayUtc();
+      if (
+        db.allocations.some(
+          (x) => x.room_id === room.id && x.status === 'ACTIVE' && parseRange(x.stay)[1] > today,
+        )
+      ) {
+        throw new PgError('ERR_ROOM_HAS_BOOKINGS');
+      }
+      db.room_closures = db.room_closures.filter(
+        (c) => c.room_id !== room.id || parseRange(c.period)[1] <= today,
+      );
+      room.is_active = false;
+      room.deleted_at = new Date().toISOString();
+      audit('room_deleted', 'rooms', room.id, { room_type: room.room_type });
       return null;
     },
 

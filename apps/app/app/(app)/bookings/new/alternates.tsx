@@ -51,7 +51,7 @@ export default function BookingAlternatesScreen() {
   };
 
   const windows = plan?.windows || [];
-  const isPriority = category === 'MSA' || category === 'PI';
+  const isPriority = category === 'MFA' || category === 'PI';
 
   // Denial state
   const [showDenyDialog, setShowDenyDialog] = useState(false);

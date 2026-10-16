@@ -359,9 +359,9 @@ There are two roles. **Administrators** can do everything, including suites, use
 | `enter_guest_details` | Enter or backfill guest details |
 | `reveal_guest_pii` | Reveal guest personal details, search by ID |
 | `cancel_booking` | Cancel bookings |
-| `approve_eviction` | Displace lower-priority bookings (MSA over PI/LEAVE/TD, PI over LEAVE/TD) |
+| `approve_eviction` | Displace lower-priority bookings (MFA over PI/LEAVE/TD, PI over LEAVE/TD) |
 | `view_reports` | Reports and statistics |
-| `deny_request` | Deny LEAVE/TD requests (MSA and PI cannot be denied) |
+| `deny_request` | Deny LEAVE/TD requests (MFA and PI cannot be denied) |
 | `manage_rooms` | Add and edit rooms, mark rooms out of service, end closures. **Never suites.** |
 
 Suites (VVIP) are admin-only everywhere: booking, editing, closing and viewing closures.

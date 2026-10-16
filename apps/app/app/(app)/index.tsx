@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { useThemeStore } from '../../src/state/themeStore';
 import { Screen } from '../../src/ui/primitives/Screen';
 import { Stat } from '../../src/ui/primitives/Stat';
@@ -43,7 +43,6 @@ const GROUP_LABELS: Record<string, string> = {
 export default function DashboardScreen() {
   const router = useRouter();
   const colors = useThemeStore((s) => s.colors);
-  const queryClient = useQueryClient();
 
   const [typeFilter, setTypeFilter] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
@@ -97,29 +96,7 @@ export default function DashboardScreen() {
     },
   });
 
-  // Realtime subscription setup
-  // Unique per mount: a shared 'dashboard-realtime' topic races with dev-mode's
-  // mount→cleanup→remount, since removeChannel() unsubscribes asynchronously and
-  // the remount can reuse the still-subscribed channel before it's gone.
-  const channelNameRef = useRef(`dashboard-realtime-${Math.random().toString(36).slice(2)}`);
-
-  useEffect(() => {
-    const channel = supabase
-      .channel(channelNameRef.current)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'allocations' }, () => {
-        queryClient.invalidateQueries({ queryKey: ['dashboard_counts'] });
-        queryClient.invalidateQueries({ queryKey: ['daily_room_state'] });
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, () => {
-        queryClient.invalidateQueries({ queryKey: ['dashboard_counts'] });
-        queryClient.invalidateQueries({ queryKey: ['daily_room_state'] });
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [queryClient]);
+  // Live updates come from the app-wide useRealtimeSync() in (app)/_layout.
 
   // Filter rooms
   const filteredRooms = (roomStates || []).filter((r: any) => {
