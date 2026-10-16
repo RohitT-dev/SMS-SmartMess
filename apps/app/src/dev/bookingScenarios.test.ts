@@ -489,6 +489,27 @@ describe('closures, concurrency, rules', () => {
     expect((await sb.rpc('end_room_closure', { p_closure_id: running })).error?.message).toContain('ERR_PERMISSION');
   });
 
+  it('admin can delete a room; it needs no bookings, is admin-only, and takes no new allocations', async () => {
+    const held = await book({ checkIn: d(1), checkOut: d(3), guests: [G('M', 'FO')], pref: 'VIP' });
+    expect(held.placements[0].room).toBe('V-01');
+    // current/upcoming booking blocks deletion
+    expect((await sb.rpc('delete_room', { p_room_id: roomIds['V-01'] })).error?.message).toContain('ERR_ROOM_HAS_BOOKINGS');
+    // clerks cannot delete
+    await signInAs('clerk');
+    expect((await sb.rpc('delete_room', { p_room_id: roomIds['V-02'] })).error?.message).toContain('ERR_PERMISSION');
+    await signInAs('admin');
+    // an empty room deletes, and the server refuses to place anyone in it afterwards
+    expect((await sb.rpc('delete_room', { p_room_id: roomIds['V-02'] })).error).toBeNull();
+    const forced = await sb.rpc('create_booking', {
+      p_booking: { category: 'MFA', check_in: d(1), check_out: d(2), party_size: 1, is_suite_booking: false },
+      p_guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }],
+      p_allocations: [{ guest_seq: 1, room_id: roomIds['V-02'], bed_slot: 1 }],
+    });
+    expect(forced.error?.message).toContain('ERR_ROOM_CLOSED');
+    // deleting twice is a clean not-found
+    expect((await sb.rpc('delete_room', { p_room_id: roomIds['V-02'] })).error?.message).toContain('ERR_NOT_FOUND');
+  });
+
   it('a stale plan loses the race cleanly with a friendly message (double booking)', async () => {
     const stale = await plan({ checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO')], pref: 'VIP' });
     await book({ checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO')], pref: 'VIP' }); // someone else gets V-01 bed 1

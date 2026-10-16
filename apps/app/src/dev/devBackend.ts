@@ -263,6 +263,9 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       if (mismatch) throw new PgError('ERR_SHARE_RULE');
     }
 
+    // trg_allocations_closure_rule: deleted or offline rooms take no new allocations
+    if (row.status === 'ACTIVE' && (!room.is_active || room.deleted_at)) throw new PgError('ERR_ROOM_CLOSED');
+
     // trg_allocations_suite_rule
     if (room.room_type === 'SUITE') {
       if (!(isAdmin() && booking.is_suite_booking)) throw new PgError('ERR_SUITE_ONLY_ADMIN');
