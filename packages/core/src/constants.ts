@@ -100,7 +100,8 @@ export const PERMISSION_LIST = [
   'cancel_booking',
   'approve_eviction',
   'view_reports',
-  'deny_request'
+  'deny_request',
+  'manage_rooms'
 ] as const;
 
 export type Permission = (typeof PERMISSION_LIST)[number];

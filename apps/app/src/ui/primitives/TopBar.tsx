@@ -1,10 +1,12 @@
 import React from 'react';
-import { View, Text, StyleSheet, Pressable } from 'react-native';
+import { View, Text, StyleSheet, Pressable, useWindowDimensions } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useThemeStore } from '../../state/themeStore';
 import { useSessionStore } from '../../state/sessionStore';
 import { layout, spacing, typography } from '../tokens';
 import { Badge } from './Badge';
+import { Icon } from './Icon';
+import { logAction } from '../../lib/activityLog';
 
 export interface TopBarProps {
   title: string;
@@ -15,44 +17,75 @@ export const TopBar: React.FC<TopBarProps> = ({ title, showBack = false }) => {
   const router = useRouter();
   const { colors, isDark, toggleTheme } = useThemeStore();
   const { userRole, lockSession } = useSessionStore();
+  const { width } = useWindowDimensions();
+  const isPhone = width < layout.phoneBreakpoint;
 
   const handleLock = () => {
+    logAction('session.lock', { meta: { trigger: 'top_bar' } });
     lockSession();
     router.replace('/(auth)/unlock');
   };
 
   return (
     <View style={styles.wrapper}>
-      <View style={[styles.container, { backgroundColor: colors.surface, borderBottomColor: colors.border }]}>
+      <View
+        style={[
+          styles.container,
+          {
+            backgroundColor: colors.surface,
+            borderBottomColor: colors.border,
+            paddingHorizontal: isPhone ? spacing.sm : spacing.lg,
+          },
+        ]}
+      >
         <View style={styles.left}>
           {showBack ? (
             <Pressable
-              onPress={() => router.back()}
+              onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))}
               accessible={true}
               accessibilityRole="button"
               accessibilityLabel="Go back"
               style={styles.backButton}
             >
-              <Text style={[styles.backText, { color: colors.blue }]}>← Back</Text>
+              <Icon name="back" size={22} color={colors.blue} />
+              {!isPhone ? (
+                <Text style={[styles.backText, { color: colors.blue }]}>Back</Text>
+              ) : null}
             </Pressable>
           ) : null}
-          <Text style={[styles.title, { color: colors.navy }]}>{title}</Text>
+          <Text
+            numberOfLines={1}
+            accessibilityRole="header"
+            style={[
+              styles.title,
+              { color: colors.navy, fontSize: isPhone ? typography.base + 1 : typography.lg },
+            ]}
+          >
+            {title}
+          </Text>
         </View>
 
         <View style={styles.right}>
-          <Badge
-            label={userRole === 'admin' ? 'ADMIN' : 'CLERK'}
-            variant={userRole === 'admin' ? 'saffron' : 'default'}
-          />
+          {!isPhone ? (
+            <View style={styles.roleBadge}>
+              <Badge
+                label={userRole === 'admin' ? 'Admin' : 'Clerk'}
+                variant={userRole === 'admin' ? 'saffron' : 'default'}
+              />
+            </View>
+          ) : null}
 
           <Pressable
-            onPress={toggleTheme}
+            onPress={() => {
+              toggleTheme();
+              logAction('settings.theme_toggle', { meta: { to: isDark ? 'light' : 'dark' } });
+            }}
             accessible={true}
             accessibilityRole="button"
-            accessibilityLabel="Toggle color theme"
-            style={[styles.iconButton, { borderColor: colors.border }]}
+            accessibilityLabel={isDark ? 'Switch to light theme' : 'Switch to dark theme'}
+            style={[styles.iconButton, { borderColor: colors.borderStrong }]}
           >
-            <Text style={{ color: colors.text, fontSize: 12 }}>{isDark ? '☀️' : '🌙'}</Text>
+            <Icon name={isDark ? 'sun' : 'moon'} size={18} color={colors.text} />
           </Pressable>
 
           <Pressable
@@ -60,9 +93,10 @@ export const TopBar: React.FC<TopBarProps> = ({ title, showBack = false }) => {
             accessible={true}
             accessibilityRole="button"
             accessibilityLabel="Lock application"
-            style={[styles.lockButton, { backgroundColor: colors.bg, borderColor: colors.border }]}
+            style={[styles.lockButton, { borderColor: colors.borderStrong }]}
           >
-            <Text style={[styles.lockText, { color: colors.navy }]}>🔒 Lock</Text>
+            <Icon name="lock" size={18} color={colors.navy} />
+            {!isPhone ? <Text style={[styles.lockText, { color: colors.navy }]}>Lock</Text> : null}
           </Pressable>
         </View>
       </View>
@@ -76,60 +110,70 @@ export const TopBar: React.FC<TopBarProps> = ({ title, showBack = false }) => {
 const styles = StyleSheet.create({
   wrapper: {
     width: '100%',
-    zIndex: 10
+    zIndex: 10,
   },
   container: {
     minHeight: 56,
-    paddingHorizontal: spacing.lg,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    borderBottomWidth: layout.borderWidth
+    borderBottomWidth: layout.borderWidth,
   },
   left: {
+    flex: 1,
     flexDirection: 'row',
-    alignItems: 'center'
+    alignItems: 'center',
+    marginRight: spacing.sm,
   },
   backButton: {
     minHeight: layout.minTouchTarget,
-    justifyContent: 'center',
-    marginRight: spacing.md
+    minWidth: layout.minTouchTarget,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginRight: spacing.sm,
+    marginLeft: -spacing.xs,
   },
   backText: {
     fontSize: typography.sm,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.semibold,
   },
   title: {
-    fontSize: typography.lg,
-    fontWeight: typography.weights.bold
+    flexShrink: 1,
+    fontWeight: typography.weights.bold,
   },
   right: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm
+    gap: spacing.sm,
+  },
+  roleBadge: {
+    justifyContent: 'center',
   },
   iconButton: {
-    width: 36,
-    height: 36,
+    width: layout.minTouchTarget,
+    height: layout.minTouchTarget,
     borderRadius: layout.borderRadius,
     borderWidth: layout.borderWidth,
     justifyContent: 'center',
-    alignItems: 'center'
+    alignItems: 'center',
   },
   lockButton: {
-    paddingHorizontal: spacing.sm,
-    height: 36,
+    flexDirection: 'row',
+    gap: spacing.xs,
+    paddingHorizontal: spacing.md,
+    minWidth: layout.minTouchTarget,
+    height: layout.minTouchTarget,
     borderRadius: layout.borderRadius,
     borderWidth: layout.borderWidth,
     justifyContent: 'center',
-    alignItems: 'center'
+    alignItems: 'center',
   },
   lockText: {
-    fontSize: typography.xs,
-    fontWeight: typography.weights.bold
+    fontSize: typography.sm,
+    fontWeight: typography.weights.semibold,
   },
   saffronLine: {
     height: layout.saffronBarHeight,
-    width: '100%'
-  }
+    width: '100%',
+  },
 });

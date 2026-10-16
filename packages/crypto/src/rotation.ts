@@ -29,8 +29,15 @@ export function beginRotation(currentVersion: number): RotationState {
 }
 
 export interface ReencryptRowItem {
+  /** Primary key value used to locate/update the row. */
   id: string;
   ciphertext: string;
+  /**
+   * Id bound into the AAD as `<table>.<column>.<aadId>`. Defaults to `id`.
+   * Needed for tables (e.g. `evictions`) where the AAD id is not the row's
+   * own primary key — see `reencrypt_batch` in the rotation migration.
+   */
+  aadId?: string;
 }
 
 export interface ReencryptBatchParams {
@@ -48,9 +55,23 @@ export interface ReencryptedRowResult {
   newCiphertext: string;
 }
 
+export interface ReencryptFailure {
+  id: string;
+  error: string;
+}
+
+export interface ReencryptBatchResult {
+  succeeded: ReencryptedRowResult[];
+  failed: ReencryptFailure[];
+}
+
 /**
  * Re-encrypts a batch of rows under the new subkey and new key version.
  * Verifies that the row was encrypted under the oldVersion.
+ *
+ * A row that fails to decrypt (wrong AAD, corrupt ciphertext, etc.) is
+ * reported in `failed` rather than aborting the whole batch — rotation must
+ * still finish for every other row even if one legacy row is unrecoverable.
  */
 export function reencryptBatch({
   rows,
@@ -60,28 +81,34 @@ export function reencryptBatch({
   newVersion,
   table,
   column
-}: ReencryptBatchParams): ReencryptedRowResult[] {
-  return rows.map((row) => {
-    const aad = `${table}.${column}.${row.id}`;
-    const plaintext = decryptEnvelope({
-      envelope: row.ciphertext,
-      subkey: oldSubkey,
-      aad,
-      allowedKeyVersions: [oldVersion]
-    });
+}: ReencryptBatchParams): ReencryptBatchResult {
+  const succeeded: ReencryptedRowResult[] = [];
+  const failed: ReencryptFailure[] = [];
 
-    const newCiphertext = encryptEnvelope({
-      plaintext,
-      subkey: newSubkey,
-      keyVersion: newVersion,
-      aad
-    });
+  for (const row of rows) {
+    const aad = `${table}.${column}.${row.aadId ?? row.id}`;
+    try {
+      const plaintext = decryptEnvelope({
+        envelope: row.ciphertext,
+        subkey: oldSubkey,
+        aad,
+        allowedKeyVersions: [oldVersion]
+      });
 
-    return {
-      id: row.id,
-      newCiphertext
-    };
-  });
+      const newCiphertext = encryptEnvelope({
+        plaintext,
+        subkey: newSubkey,
+        keyVersion: newVersion,
+        aad
+      });
+
+      succeeded.push({ id: row.id, newCiphertext });
+    } catch (err) {
+      failed.push({ id: row.id, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  return { succeeded, failed };
 }
 
 export interface ActiveUserRecord {

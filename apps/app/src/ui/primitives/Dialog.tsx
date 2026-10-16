@@ -31,7 +31,7 @@ export const Dialog: React.FC<DialogProps> = ({
   loading = false,
   children,
   onConfirm,
-  onCancel
+  onCancel,
 }) => {
   const colors = useThemeStore((s) => s.colors);
   const [typedWord, setTypedWord] = useState('');
@@ -63,13 +63,15 @@ export const Dialog: React.FC<DialogProps> = ({
             styles.dialog,
             {
               backgroundColor: colors.surface,
-              borderColor: colors.border
-            }
+              borderColor: colors.border,
+            },
           ]}
         >
           <ScrollView contentContainerStyle={styles.scrollContent}>
             <Text style={[styles.title, { color: colors.text }]}>{title}</Text>
-            {message ? <Text style={[styles.message, { color: colors.muted }]}>{message}</Text> : null}
+            {message ? (
+              <Text style={[styles.message, { color: colors.muted }]}>{message}</Text>
+            ) : null}
 
             {children ? <View style={styles.childrenContainer}>{children}</View> : null}
 
@@ -84,8 +86,8 @@ export const Dialog: React.FC<DialogProps> = ({
                     {
                       backgroundColor: colors.bg,
                       borderColor: colors.border,
-                      color: colors.text
-                    }
+                      color: colors.text,
+                    },
                   ]}
                   multiline={true}
                   numberOfLines={3}
@@ -111,8 +113,8 @@ export const Dialog: React.FC<DialogProps> = ({
                     {
                       backgroundColor: colors.bg,
                       borderColor: colors.border,
-                      color: colors.text
-                    }
+                      color: colors.text,
+                    },
                   ]}
                   placeholder={requireTypedWord}
                   placeholderTextColor={colors.muted}
@@ -152,7 +154,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.5)',
     justifyContent: 'center',
     alignItems: 'center',
-    padding: spacing.lg
+    padding: spacing.md,
   },
   dialog: {
     width: '100%',
@@ -160,37 +162,37 @@ const styles = StyleSheet.create({
     maxHeight: '90%',
     borderRadius: layout.borderRadius,
     borderWidth: layout.borderWidth,
-    padding: spacing.lg
+    padding: spacing.lg,
   },
   scrollContent: {
-    paddingVertical: spacing.xs
+    paddingVertical: spacing.xs,
   },
   title: {
     fontSize: typography.lg,
     fontWeight: typography.weights.bold,
-    marginBottom: spacing.xs
+    marginBottom: spacing.xs,
   },
   message: {
     fontSize: typography.sm,
-    marginBottom: spacing.md
+    marginBottom: spacing.md,
   },
   childrenContainer: {
-    marginBottom: spacing.md
+    marginBottom: spacing.md,
   },
   inputSection: {
-    marginBottom: spacing.md
+    marginBottom: spacing.md,
   },
   inputLabel: {
     fontSize: typography.xs,
     fontWeight: typography.weights.medium,
-    marginBottom: spacing.xs
+    marginBottom: spacing.xs,
   },
   input: {
     minHeight: layout.minTouchTarget,
     borderWidth: layout.borderWidth,
     borderRadius: layout.borderRadius,
     paddingHorizontal: spacing.md,
-    fontSize: typography.base
+    fontSize: typography.base,
   },
   textArea: {
     minHeight: 80,
@@ -198,15 +200,15 @@ const styles = StyleSheet.create({
     borderRadius: layout.borderRadius,
     padding: spacing.md,
     fontSize: typography.base,
-    textAlignVertical: 'top'
+    textAlignVertical: 'top',
   },
   charCount: {
     fontSize: typography.xs,
     alignSelf: 'flex-end',
-    marginTop: spacing.xs
+    marginTop: spacing.xs,
   },
   actions: {
     flexDirection: 'row',
-    marginTop: spacing.md
-  }
+    marginTop: spacing.md,
+  },
 });

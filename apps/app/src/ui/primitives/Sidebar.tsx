@@ -1,92 +1,99 @@
 import React from 'react';
-import { View, Text, StyleSheet, Pressable } from 'react-native';
+import { View, Text, StyleSheet, Pressable, ViewStyle } from 'react-native';
 import { useRouter, usePathname } from 'expo-router';
 import { useThemeStore } from '../../state/themeStore';
 import { useSessionStore } from '../../state/sessionStore';
 import { layout, spacing, typography } from '../tokens';
+import { NAV_ITEMS, isNavActive, canSeeNavItem } from '../navigation';
+import { Icon } from './Icon';
+import type { InteractionState } from './Button';
 
-interface NavItem {
-  label: string;
-  path: string;
-  adminOnly?: boolean;
-}
-
-const NAV_ITEMS: NavItem[] = [
-  { label: 'Room Inventory', path: '/' },
-  { label: 'New Booking', path: '/bookings/new' },
-  { label: 'Bookings & Ledger', path: '/bookings' },
-  { label: 'Reports & Insights', path: '/reports' },
-  { label: 'VVIP Suites', path: '/suites', adminOnly: true },
-  { label: 'User Directory', path: '/admin/users', adminOnly: true },
-  { label: 'Rooms & Data', path: '/admin/data', adminOnly: true },
-  { label: 'Audit Trail', path: '/admin/audit', adminOnly: true },
-  { label: 'Key Management', path: '/admin/keys', adminOnly: true },
-  { label: 'Settings', path: '/settings' }
-];
+// Admin-only destinations sit below a divider so daily work stays at the top.
+const isAdminItem = (path: string) => path.startsWith('/admin') || path === '/suites';
 
 export const Sidebar: React.FC = () => {
   const router = useRouter();
   const pathname = usePathname();
   const colors = useThemeStore((s) => s.colors);
   const userRole = useSessionStore((s) => s.userRole);
+  const userPermissions = useSessionStore((s) => s.userPermissions);
 
-  const filteredItems = NAV_ITEMS.filter((item) => !item.adminOnly || userRole === 'admin');
+  const visible = NAV_ITEMS.filter((item) => canSeeNavItem(item, userRole, userPermissions));
+  const sections = [
+    { key: 'daily', label: null, items: visible.filter((i) => !isAdminItem(i.path) && i.path !== '/settings') },
+    { key: 'admin', label: 'Administration', items: visible.filter((i) => isAdminItem(i.path)) },
+    { key: 'settings', label: null, items: visible.filter((i) => i.path === '/settings') },
+  ].filter((s) => s.items.length > 0);
 
   return (
-    <View
-      style={[
-        styles.sidebar,
-        {
-          backgroundColor: colors.surface,
-          borderRightColor: colors.border
-        }
-      ]}
-    >
+    <View style={[styles.sidebar, { backgroundColor: colors.chrome, borderRightColor: colors.border }]}>
       <View style={styles.brand}>
-        <Text style={[styles.brandTitle, { color: colors.navy }]}>Smart Mess System</Text>
-        <Text style={[styles.brandSubtitle, { color: colors.muted }]}>Room Inventory v1.0</Text>
+        <View style={[styles.brandMark, { backgroundColor: colors.saffron }]} />
+        <View>
+          <Text style={[styles.brandTitle, { color: colors.onChrome }]}>Smart Mess</Text>
+          <Text style={[styles.brandSubtitle, { color: colors.chromeMuted }]}>
+            Room allotment register
+          </Text>
+        </View>
       </View>
 
-      <View style={styles.nav}>
-        {filteredItems.map((item) => {
-          const isActive =
-            item.path === '/'
-              ? pathname === '/'
-              : pathname.startsWith(item.path);
+      {sections.map((section) => (
+        <View
+          key={section.key}
+          style={[styles.section, section.key === 'settings' && styles.sectionBottom]}
+        >
+          {section.label ? (
+            <Text style={[styles.sectionLabel, { color: colors.chromeMuted }]}>{section.label}</Text>
+          ) : null}
+          {section.items.map((item) => {
+            const isActive = isNavActive(item.path, pathname);
+            const fg = isActive ? colors.onChrome : colors.chromeMuted;
 
-          return (
-            <Pressable
-              key={item.path}
-              onPress={() => router.push(item.path as any)}
-              accessible={true}
-              accessibilityRole="link"
-              accessibilityState={{ selected: isActive }}
-              style={({ pressed }) => [
-                styles.navItem,
-                {
-                  backgroundColor: isActive
-                    ? colors.navy
-                    : pressed
-                    ? colors.bg
-                    : 'transparent'
-                }
-              ]}
-            >
-              <Text
-                style={[
-                  styles.navText,
-                  {
-                    color: isActive ? '#FFFFFF' : colors.text,
-                    fontWeight: isActive ? typography.weights.bold : typography.weights.medium
-                  }
-                ]}
+            return (
+              <Pressable
+                key={item.path}
+                onPress={() => router.push(item.path as any)}
+                accessible={true}
+                accessibilityRole="link"
+                accessibilityState={{ selected: isActive }}
+                style={(state) => {
+                  const { pressed, hovered, focused } = state as InteractionState;
+                  return [
+                    styles.navItem,
+                    {
+                      backgroundColor:
+                        isActive || pressed || hovered ? colors.chromeRaised : 'transparent',
+                    },
+                    focused
+                      ? ({ outlineColor: colors.saffron, outlineWidth: 2, outlineStyle: 'solid' } as ViewStyle)
+                      : null,
+                  ];
+                }}
               >
-                {item.label}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </View>
+                <View
+                  style={[
+                    styles.activeMark,
+                    { backgroundColor: isActive ? colors.saffron : 'transparent' },
+                  ]}
+                />
+                <Icon name={item.icon} size={18} color={fg} />
+                <Text
+                  numberOfLines={1}
+                  style={[
+                    styles.navText,
+                    {
+                      color: fg,
+                      fontWeight: isActive ? typography.weights.semibold : typography.weights.regular,
+                    },
+                  ]}
+                >
+                  {item.label}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+      ))}
     </View>
   );
 };
@@ -94,34 +101,63 @@ export const Sidebar: React.FC = () => {
 const styles = StyleSheet.create({
   sidebar: {
     width: layout.sidebarWidth,
-    borderRightWidth: layout.borderWidth,
     height: '100%',
-    padding: spacing.md
+    borderRightWidth: layout.borderWidth,
+    paddingHorizontal: spacing.sm,
+    paddingBottom: spacing.md,
   },
   brand: {
-    paddingVertical: spacing.md,
-    borderBottomWidth: layout.borderWidth,
-    borderBottomColor: '#DDE2E8',
-    marginBottom: spacing.md
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    paddingHorizontal: spacing.sm,
+    minHeight: 59,
+    marginBottom: spacing.md,
+  },
+  brandMark: {
+    width: 4,
+    height: 28,
+    borderRadius: 1,
   },
   brandTitle: {
     fontSize: typography.base,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
+    letterSpacing: 0.2,
   },
   brandSubtitle: {
     fontSize: typography.xs,
-    marginTop: 2
+    marginTop: 1,
   },
-  nav: {
-    gap: spacing.xs
+  section: {
+    gap: 2,
+    marginBottom: spacing.lg,
+  },
+  sectionBottom: {
+    marginTop: 'auto',
+    marginBottom: 0,
+  },
+  sectionLabel: {
+    fontSize: typography.xs,
+    fontWeight: typography.weights.semibold,
+    paddingHorizontal: spacing.md,
+    marginBottom: spacing.xs,
   },
   navItem: {
-    minHeight: layout.minTouchTarget,
-    paddingHorizontal: spacing.md,
+    minHeight: 40,
+    paddingRight: spacing.md,
     borderRadius: layout.borderRadius,
-    justifyContent: 'center'
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    overflow: 'hidden',
+  },
+  activeMark: {
+    width: 3,
+    alignSelf: 'stretch',
+    marginRight: spacing.xs,
   },
   navText: {
-    fontSize: typography.sm
-  }
+    fontSize: typography.sm,
+    flexShrink: 1,
+  },
 });

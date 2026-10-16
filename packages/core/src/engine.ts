@@ -164,27 +164,49 @@ export function planAllotment(request: BookingPlanRequest, states: RoomDayState[
     .filter((r) => r.roomType !== 'SUITE' && !r.isClosed)
     .sort((a, b) => a.displayOrder - b.displayOrder);
 
-  // Attempt plan with preferred room type first if specified
-  if (request.preferredRoomType && request.preferredRoomType !== 'SUITE') {
-    const preferredRooms = roomSummaries.filter((r) => r.roomType === request.preferredRoomType);
-    const result = tryAssignRooms(pairs, singles, preferredRooms);
-    if (result) {
+  const preferredType =
+    request.preferredRoomType && request.preferredRoomType !== 'SUITE'
+      ? request.preferredRoomType
+      : undefined;
+
+  if (request.preferSharing) {
+    // Shared rooms first, across every room type; the preferred type only orders the choices.
+    const ordered = [...roomSummaries].sort(
+      (a, b) =>
+        Number(b.roomType === preferredType) - Number(a.roomType === preferredType) ||
+        a.displayOrder - b.displayOrder
+    );
+    const shared = tryAssignRooms(pairs, singles, ordered, true);
+    if (shared) {
       return {
         kind: 'ALLOT',
-        assignments: result,
-        usedFallbackType: false
+        assignments: shared,
+        usedFallbackType: Boolean(preferredType && shared.some((a) => a.roomType !== preferredType))
       };
     }
-  }
+  } else {
+    // Attempt plan with preferred room type first if specified
+    if (preferredType) {
+      const preferredRooms = roomSummaries.filter((r) => r.roomType === preferredType);
+      const result = tryAssignRooms(pairs, singles, preferredRooms);
+      if (result) {
+        return {
+          kind: 'ALLOT',
+          assignments: result,
+          usedFallbackType: false
+        };
+      }
+    }
 
-  // Attempt across all non-suite room types
-  const fullResult = tryAssignRooms(pairs, singles, roomSummaries);
-  if (fullResult) {
-    return {
-      kind: 'ALLOT',
-      assignments: fullResult,
-      usedFallbackType: Boolean(request.preferredRoomType && request.preferredRoomType !== 'SUITE')
-    };
+    // Attempt across all non-suite room types
+    const fullResult = tryAssignRooms(pairs, singles, roomSummaries);
+    if (fullResult) {
+      return {
+        kind: 'ALLOT',
+        assignments: fullResult,
+        usedFallbackType: Boolean(preferredType)
+      };
+    }
   }
 
   // If nothing fits for these dates, compute alternates or check eviction / denial
@@ -207,7 +229,8 @@ export function planAllotment(request: BookingPlanRequest, states: RoomDayState[
 function tryAssignRooms(
   pairs: Array<[GuestDemand & { guestIndex: number }, GuestDemand & { guestIndex: number }]>,
   singles: Array<GuestDemand & { guestIndex: number }>,
-  availableRooms: RoomIntervalSummary[]
+  availableRooms: RoomIntervalSummary[],
+  preferSharing = false
 ): PlannedAssignment[] | null {
   const assignments: PlannedAssignment[] = [];
   const roomPool = availableRooms.map((r) => ({ ...r }));
@@ -228,50 +251,54 @@ function tryAssignRooms(
     );
   }
 
-  // 2. Assign remaining singles:
-  // Heuristic: First try whole free rooms for singles
-  // Then use compatible partial rooms (shareable beds) only when whole rooms run out
-  const remainingSingles = [...singles];
-  const unplacedSingles: typeof remainingSingles = [];
-
-  for (const s of remainingSingles) {
-    const wholeRoomIdx = roomPool.findIndex((r) => r.bed1Free && r.bed2Free);
-    if (wholeRoomIdx !== -1) {
-      const r = roomPool[wholeRoomIdx];
-      r.bed1Free = false;
-      // Mark lone guest occupant info on bed 1 so the second bed is open to a compatible guest
-      r.bed1Occupant = { gender: s.gender, rankCode: s.rankCode };
-      assignments.push({ guestIndex: s.guestIndex, roomId: r.roomId, roomType: r.roomType, bedSlot: 1 });
-    } else {
-      unplacedSingles.push(s);
-    }
-  }
-
-  // For unplaced singles, find compatible partial rooms
-  for (const s of unplacedSingles) {
-    const compatibleRoomIdx = roomPool.findIndex((r) => {
-      // Check bed 1 free with bed 2 occupied by same gender and rank
+  // 2. Assign remaining singles. Default: a whole free room first, a compatible shared bed only
+  // when whole rooms run out. With preferSharing the order flips: shared beds first.
+  const findShared = (s: GuestDemand) =>
+    roomPool.findIndex((r) => {
       if (r.bed1Free && !r.bed2Free && r.bed2Occupant) {
         return r.bed2Occupant.gender === s.gender && r.bed2Occupant.rankCode === s.rankCode;
       }
-      // Check bed 2 free with bed 1 occupied by same gender and rank
       if (r.bed2Free && !r.bed1Free && r.bed1Occupant) {
         return r.bed1Occupant.gender === s.gender && r.bed1Occupant.rankCode === s.rankCode;
       }
       return false;
     });
+  const findWhole = () => roomPool.findIndex((r) => r.bed1Free && r.bed2Free);
 
-    if (compatibleRoomIdx === -1) {
-      return null; // Cannot fit
-    }
+  const seatShared = (s: GuestDemand & { guestIndex: number }, idx: number) => {
+    const r = roomPool[idx];
+    const bedSlot: 1 | 2 = r.bed1Free ? 1 : 2;
+    if (bedSlot === 1) r.bed1Free = false;
+    else r.bed2Free = false;
+    assignments.push({ guestIndex: s.guestIndex, roomId: r.roomId, roomType: r.roomType, bedSlot });
+  };
+  const seatWhole = (s: GuestDemand & { guestIndex: number }, idx: number) => {
+    const r = roomPool[idx];
+    r.bed1Free = false;
+    // Record the lone occupant so bed 2 stays open to a compatible guest.
+    r.bed1Occupant = { gender: s.gender, rankCode: s.rankCode };
+    assignments.push({ guestIndex: s.guestIndex, roomId: r.roomId, roomType: r.roomType, bedSlot: 1 });
+  };
 
-    const r = roomPool[compatibleRoomIdx];
-    if (r.bed1Free) {
-      r.bed1Free = false;
-      assignments.push({ guestIndex: s.guestIndex, roomId: r.roomId, roomType: r.roomType, bedSlot: 1 });
+  for (const s of singles) {
+    if (preferSharing) {
+      const sharedIdx = findShared(s);
+      if (sharedIdx !== -1) {
+        seatShared(s, sharedIdx);
+        continue;
+      }
+      const wholeIdx = findWhole();
+      if (wholeIdx === -1) return null;
+      seatWhole(s, wholeIdx);
     } else {
-      r.bed2Free = false;
-      assignments.push({ guestIndex: s.guestIndex, roomId: r.roomId, roomType: r.roomType, bedSlot: 2 });
+      const wholeIdx = findWhole();
+      if (wholeIdx !== -1) {
+        seatWhole(s, wholeIdx);
+        continue;
+      }
+      const sharedIdx = findShared(s);
+      if (sharedIdx === -1) return null;
+      seatShared(s, sharedIdx);
     }
   }
 
@@ -322,7 +349,7 @@ export function findAlternateWindows(
       if (list.length === 1) singles.push(list.shift()!);
     }
 
-    const result = tryAssignRooms(pairs, singles, altSummaries);
+    const result = tryAssignRooms(pairs, singles, altSummaries, request.preferSharing);
     if (result) {
       const wholeRoomsFree = altSummaries.filter((r) => r.bed1Free && r.bed2Free).length;
       windows.push({
@@ -350,6 +377,7 @@ export function rankCandidates(candidates: EvictionCandidate[]): EvictionCandida
     if (b.daysStayed !== a.daysStayed) {
       return b.daysStayed - a.daysStayed;
     }
-    return a.roomCode.localeCompare(b.roomCode);
+    const byRoom = a.roomCode.localeCompare(b.roomCode, undefined, { numeric: true });
+    return byRoom !== 0 ? byRoom : a.bedSlot - b.bedSlot;
   });
 }

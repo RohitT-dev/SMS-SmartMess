@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
-import { useRouter } from 'expo-router';
+import { View, Text, StyleSheet } from 'react-native';
 import { useQuery } from '@tanstack/react-query';
 import { useThemeStore } from '../../../src/state/themeStore';
 import { Screen } from '../../../src/ui/primitives/Screen';
@@ -9,106 +8,127 @@ import { Stat } from '../../../src/ui/primitives/Stat';
 import { Button } from '../../../src/ui/primitives/Button';
 import { Segmented } from '../../../src/ui/primitives/Segmented';
 import { DateRange } from '../../../src/ui/primitives/DateRange';
-import { Banner } from '../../../src/ui/primitives/Banner';
 import { Table } from '../../../src/ui/primitives/Table';
+import { Banner } from '../../../src/ui/primitives/Banner';
+import { userErrorMessage } from '../../../src/lib/userError';
 import { spacing, typography } from '../../../src/ui/tokens';
 import { supabase } from '../../../src/lib/supabase';
+import { logAction } from '../../../src/lib/activityLog';
+import { addDaysToDateString, isValidDateString, localDateString } from '../../../src/lib/dates';
 import { ChartSvg } from '../../../src/features/reports/chartSvg';
 import { exportReportPdf } from '../../../src/features/reports/pdfGenerator';
-import {
-  reportInsights,
-  type ReportDailyRow
-} from '@sms/core';
+import { reportInsights, type ReportDailyRow } from '@sms/core';
 
 export default function ReportsScreen() {
-  const router = useRouter();
   const colors = useThemeStore((s) => s.colors);
 
-  const [rangePreset, setRangePreset] = useState<'this_month' | 'last_month' | 'custom'>('this_month');
-  
-  // Compute initial dates
+  const [rangePreset, setRangePreset] = useState<'this_month' | 'last_month' | 'custom'>(
+    'this_month',
+  );
+
+  // Month boundaries as local calendar dates (toISOString() would shift them a day in IST).
   const now = new Date();
-  const firstDayThisMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().split('T')[0];
-  const lastDayThisMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString().split('T')[0];
-  
-  const firstDayLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString().split('T')[0];
-  const lastDayLastMonth = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().split('T')[0];
+  const firstDayThisMonth = localDateString(new Date(now.getFullYear(), now.getMonth(), 1));
+  const lastDayThisMonth = localDateString(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+  const firstDayLastMonth = localDateString(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+  const lastDayLastMonth = localDateString(new Date(now.getFullYear(), now.getMonth(), 0));
 
   const [customFrom, setCustomFrom] = useState(firstDayThisMonth);
   const [customTo, setCustomTo] = useState(lastDayThisMonth);
 
+  // Shown dates are inclusive; the report RPCs take an exclusive upper bound.
   const fromDate =
     rangePreset === 'this_month'
       ? firstDayThisMonth
       : rangePreset === 'last_month'
-      ? firstDayLastMonth
-      : customFrom;
+        ? firstDayLastMonth
+        : customFrom;
 
-  const toDate =
+  const toDateInclusive =
     rangePreset === 'this_month'
       ? lastDayThisMonth
       : rangePreset === 'last_month'
-      ? lastDayLastMonth
-      : customTo;
+        ? lastDayLastMonth
+        : customTo;
+
+  const rangeValid =
+    isValidDateString(fromDate) && isValidDateString(toDateInclusive) && toDateInclusive >= fromDate;
+  const toDate = rangeValid ? addDaysToDateString(toDateInclusive, 1) : toDateInclusive;
 
   const periodLabel =
     rangePreset === 'this_month'
       ? 'This Month'
       : rangePreset === 'last_month'
-      ? 'Last Month'
-      : `${fromDate} to ${toDate}`;
+        ? 'Last Month'
+        : `${fromDate} to ${toDateInclusive}`;
 
   // 1. Fetch daily report data
   const { data: dailyRows, isLoading } = useQuery({
     queryKey: ['report_daily', fromDate, toDate],
+    enabled: rangeValid,
     queryFn: async () => {
       const { data, error } = await supabase.rpc('report_daily', {
         p_from: fromDate,
-        p_to: toDate
+        p_to: toDate,
       });
       if (error) throw error;
       return (data || []).map((row: any) => ({
         day: row.day,
         category: row.category,
         roomType: row.room_type,
-        people: Number(row.people)
+        people: Number(row.people),
       })) as ReportDailyRow[];
-    }
+    },
   });
 
   // 2. Fetch denials report
   const { data: denials } = useQuery({
     queryKey: ['report_denials', fromDate, toDate],
+    enabled: rangeValid,
     queryFn: async () => {
       const { data, error } = await supabase.rpc('report_denials', {
         p_from: fromDate,
-        p_to: toDate
+        p_to: toDate,
       });
       if (error) throw error;
       return (data || []).map((d: any) => ({
         category: d.category,
-        count: Number(d.count)
+        count: Number(d.count),
       }));
-    }
+    },
   });
 
-  // Total active non-suite beds (50 rooms * 2 = 100 beds approx)
-  const totalBeds = 92;
+  // Occupancy % is measured against the real inventory: two beds per active non-suite room.
+  const { data: totalBeds = 0 } = useQuery({
+    queryKey: ['report_total_beds'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('rooms')
+        .select('id, room_type, is_active')
+        .neq('room_type', 'SUITE')
+        .eq('is_active', true);
+      if (error) throw error;
+      return (data || []).length * 2;
+    },
+  });
   const insights = reportInsights(dailyRows || [], totalBeds);
 
   const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const handleExport = async () => {
     setExporting(true);
+    setExportError(null);
     try {
       await exportReportPdf({
         periodLabel,
         insights,
         dailyRows: dailyRows || [],
-        denials: denials || []
+        denials: denials || [],
       });
+      logAction('reports.export_pdf', { meta: { period: periodLabel } });
     } catch (err: any) {
-      alert('PDF export error: ' + err.message);
+      setExportError(userErrorMessage(err, 'PDF export failed.'));
     } finally {
       setExporting(false);
     }
@@ -116,24 +136,27 @@ export default function ReportsScreen() {
 
   return (
     <Screen title="Occupancy & Insights Reports" showBack={false}>
-      <ScrollView contentContainerStyle={styles.container}>
+      <View style={styles.container}>
         {/* Preset Selector */}
         <Card>
-          <Text style={[styles.cardTitle, { color: colors.navy }]}>REPORTING PERIOD</Text>
+          <Text style={[styles.cardTitle, { color: colors.navy }]}>Reporting period</Text>
           <Segmented
             value={rangePreset}
             onChange={(val) => setRangePreset(val as any)}
             options={[
               { label: 'This Month', value: 'this_month' },
               { label: 'Last Month', value: 'last_month' },
-              { label: 'Custom Range', value: 'custom' }
+              { label: 'Custom Range', value: 'custom' },
             ]}
           />
 
           {rangePreset === 'custom' && (
             <View style={{ marginTop: spacing.md }}>
               <DateRange
-                label="Custom Report Range"
+                label="Custom Report Range (both dates included)"
+                startLabel="From"
+                endLabel="To"
+                inclusive
                 startDate={customFrom}
                 endDate={customTo}
                 onStartDateChange={setCustomFrom}
@@ -142,6 +165,8 @@ export default function ReportsScreen() {
             </View>
           )}
         </Card>
+
+        {exportError && <Banner type="error" message={exportError} style={{ marginTop: spacing.md }} />}
 
         {/* Headline Numbers Strip */}
         <View style={styles.statsStrip}>
@@ -169,7 +194,8 @@ export default function ReportsScreen() {
             />
           </View>
           <Text style={[styles.chartNotice, { color: colors.muted }]}>
-            Stacked breakdown: Navy = MSA • Blue = PI • Green = LEAVE • Orange = TD • Saffron = Suite
+            Stacked breakdown: Navy = MSA • Blue = PI • Green = LEAVE • Orange = TD • Saffron =
+            Suite
           </Text>
 
           {dailyRows && dailyRows.length > 0 ? (
@@ -183,7 +209,7 @@ export default function ReportsScreen() {
 
         {/* Operational Insights */}
         <Card style={{ marginTop: spacing.md }}>
-          <Text style={[styles.cardTitle, { color: colors.navy }]}>OPERATIONAL INSIGHTS</Text>
+          <Text style={[styles.cardTitle, { color: colors.navy }]}>Operational insights</Text>
           <View style={styles.insightsList}>
             {insights.writtenInsights.map((insight, idx) => (
               <View key={idx} style={styles.insightItem}>
@@ -196,7 +222,7 @@ export default function ReportsScreen() {
 
         {/* Denials Table */}
         <Card style={{ marginTop: spacing.md }}>
-          <Text style={[styles.cardTitle, { color: colors.navy }]}>DENIALS SUMMARY</Text>
+          <Text style={[styles.cardTitle, { color: colors.navy }]}>Denials summary</Text>
           <Table
             columns={[
               { key: 'category', header: 'Visitor Category', width: 180 },
@@ -211,8 +237,8 @@ export default function ReportsScreen() {
                       ? 'Protected - Never Denied'
                       : 'Low Priority - Permitted with Written Reason'}
                   </Text>
-                )
-              }
+                ),
+              },
             ]}
             data={
               denials && denials.length > 0
@@ -221,63 +247,63 @@ export default function ReportsScreen() {
                     { category: 'LEAVE', count: 0 },
                     { category: 'TD', count: 0 },
                     { category: 'MSA', count: 0 },
-                    { category: 'PI', count: 0 }
+                    { category: 'PI', count: 0 },
                   ]
             }
             keyExtractor={(item) => item.category}
           />
         </Card>
-      </ScrollView>
+      </View>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    padding: spacing.md
+    width: '100%',
   },
   cardTitle: {
     fontSize: typography.base,
     fontWeight: typography.weights.bold,
-    marginBottom: spacing.sm
+    marginBottom: spacing.sm,
   },
   statsStrip: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: spacing.sm,
-    marginTop: spacing.md
+    marginTop: spacing.md,
   },
   chartHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: spacing.xs
+    marginBottom: spacing.xs,
   },
   chartNotice: {
     fontSize: typography.xs,
-    marginBottom: spacing.md
+    marginBottom: spacing.md,
   },
   emptyText: {
     padding: spacing.xl,
     textAlign: 'center',
-    fontStyle: 'italic'
+    fontStyle: 'italic',
   },
   insightsList: {
     gap: spacing.xs,
-    marginTop: spacing.xs
+    marginTop: spacing.xs,
   },
   insightItem: {
     flexDirection: 'row',
     gap: spacing.sm,
-    alignItems: 'flex-start'
+    alignItems: 'flex-start',
   },
   bullet: {
     fontSize: typography.base,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
   },
   insightText: {
     flex: 1,
     fontSize: typography.sm,
-    lineHeight: 20
-  }
+    lineHeight: 20,
+  },
 });

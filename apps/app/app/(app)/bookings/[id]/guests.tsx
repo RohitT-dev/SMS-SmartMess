@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useThemeStore } from '../../../../src/state/themeStore';
@@ -11,9 +11,12 @@ import { Badge } from '../../../../src/ui/primitives/Badge';
 import { Banner } from '../../../../src/ui/primitives/Banner';
 import { spacing, typography } from '../../../../src/ui/tokens';
 import { supabase } from '../../../../src/lib/supabase';
+import { logAction } from '../../../../src/lib/activityLog';
+import { userErrorMessage } from '../../../../src/lib/userError';
 import {
   encryptGuestPii,
-  computeIdBlindIndex
+  computeIdBlindIndex,
+  getActiveKeyVersion,
 } from '../../../../src/features/crypto-session/cryptoSession';
 import { GuestPiiSchema, type GuestPii } from '@sms/core';
 
@@ -30,13 +33,30 @@ export default function GuestDetailsBackfillScreen() {
     idNumber: '',
     phone: '',
     unit: '',
-    notes: ''
+    notes: '',
   });
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  const EMPTY_FORM: Partial<GuestPii> = {
+    name: '',
+    serviceNumber: '',
+    idNumber: '',
+    phone: '',
+    unit: '',
+    notes: '',
+  };
+
+  const goToGuest = (idx: number) => {
+    setCurrentIdx(idx);
+    setFormData(EMPTY_FORM);
+    setFieldErrors({});
+    setErrorMsg(null);
+  };
 
   // Fetch booking guests
-  const { data: guests, isLoading } = useQuery({
+  const { data: guests } = useQuery({
     queryKey: ['booking_guests_to_fill', id],
     queryFn: async () => {
       const { data, error } = await supabase
@@ -46,7 +66,7 @@ export default function GuestDetailsBackfillScreen() {
         .order('seq');
       if (error) throw error;
       return data || [];
-    }
+    },
   });
 
   const guestList = guests || [];
@@ -57,11 +77,17 @@ export default function GuestDetailsBackfillScreen() {
     if (!currentGuest) return;
     setSubmitting(true);
     setErrorMsg(null);
+    setFieldErrors({});
 
-    // Validate with zod
     const parsed = GuestPiiSchema.safeParse(formData);
     if (!parsed.success) {
-      setErrorMsg(parsed.error.message || 'Validation error');
+      const byField: Record<string, string> = {};
+      for (const issue of parsed.error.issues) {
+        const key = String(issue.path[0] ?? '');
+        if (key && !byField[key]) byField[key] = issue.message;
+      }
+      setFieldErrors(byField);
+      if (Object.keys(byField).length === 0) setErrorMsg('Please check the details and try again.');
       setSubmitting(false);
       return;
     }
@@ -75,30 +101,27 @@ export default function GuestDetailsBackfillScreen() {
         p_guest_id: currentGuest.id,
         p_pii_enc: cipherEnc,
         p_blind: blindIndex,
-        p_key_version: 1
+        p_key_version: getActiveKeyVersion(),
       });
 
       if (error) throw error;
+      logAction('guests.details_saved', {
+        entity: 'booking_guests',
+        entityId: currentGuest.id,
+        meta: { booking_id: id },
+      });
 
       queryClient.invalidateQueries({ queryKey: ['booking_guests_to_fill', id] });
       queryClient.invalidateQueries({ queryKey: ['booking_record', id] });
 
       // Move to next guest or finish
       if (currentIdx < guestList.length - 1) {
-        setCurrentIdx(currentIdx + 1);
-        setFormData({
-          name: '',
-          serviceNumber: '',
-          idNumber: '',
-          phone: '',
-          unit: '',
-          notes: ''
-        });
+        goToGuest(currentIdx + 1);
       } else {
         router.replace(`/(app)/bookings/${id}` as any);
       }
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to save encrypted guest details');
+    } catch (err: unknown) {
+      setErrorMsg(userErrorMessage(err, 'Failed to save encrypted guest details'));
     } finally {
       setSubmitting(false);
     }
@@ -106,37 +129,43 @@ export default function GuestDetailsBackfillScreen() {
 
   return (
     <Screen title="Guest Details" showBack={true}>
-      <ScrollView contentContainerStyle={styles.container}>
+      <View style={styles.container}>
         <Card>
           <View style={styles.progressRow}>
             <Text style={[styles.progressText, { color: colors.navy }]}>
               Progress: {filledCount} of {guestList.length} filled
             </Text>
-            <Badge
-              label={`Guest ${currentIdx + 1} of ${guestList.length}`}
-              variant="default"
-            />
+            <Badge label={`Guest ${currentIdx + 1} of ${guestList.length}`} variant="default" />
           </View>
 
           <Text style={[styles.securityNotice, { color: colors.muted }]}>
-            All fields below are encrypted client-side on this device before upload. The Supabase database and hosting staff only store ciphertext.
+            All fields below are encrypted client-side on this device before upload. The Supabase
+            database and hosting staff only store ciphertext.
           </Text>
 
           {currentGuest && (
             <View style={styles.formSection}>
               <View style={[styles.badgeStrip, { backgroundColor: colors.bg }]}>
                 <Text style={[styles.badgeStripText, { color: colors.text }]}>
-                  Rank: <Text style={{ fontWeight: 'bold' }}>{currentGuest.rank_code}</Text> • Gender:{' '}
-                  <Text style={{ fontWeight: 'bold' }}>{currentGuest.gender}</Text> • Status:{' '}
-                  <Text style={{ fontWeight: 'bold' }}>{currentGuest.details}</Text>
+                  Rank: <Text style={{ fontWeight: 'bold' }}>{currentGuest.rank_code}</Text> •
+                  Gender: <Text style={{ fontWeight: 'bold' }}>{currentGuest.gender}</Text> •
+                  Status: <Text style={{ fontWeight: 'bold' }}>{currentGuest.details}</Text>
                 </Text>
               </View>
+
+              {currentGuest.details === 'COMPLETE' && (
+                <Banner
+                  type="info"
+                  message="Details are already saved for this guest. Saving again replaces them."
+                />
+              )}
 
               <Field
                 label="Full Official Name *"
                 value={formData.name || ''}
                 onChangeText={(text) => setFormData({ ...formData, name: text })}
                 placeholder="Rank & Full Name"
+                error={fieldErrors.name}
               />
 
               <Field
@@ -147,11 +176,12 @@ export default function GuestDetailsBackfillScreen() {
               />
 
               <Field
-                label="Official ID / Aadhaar / Passport Number"
+                label="Official ID / Aadhaar / Passport Number *"
                 value={formData.idNumber || ''}
                 onChangeText={(text) => setFormData({ ...formData, idNumber: text })}
                 placeholder="Required for exact blind index lookup"
                 hint="Used to derive exact-match blind search index"
+                error={fieldErrors.idNumber}
               />
 
               <Field
@@ -160,6 +190,7 @@ export default function GuestDetailsBackfillScreen() {
                 onChangeText={(text) => setFormData({ ...formData, phone: text })}
                 placeholder="+91 XXXXX XXXXX"
                 keyboardType="phone-pad"
+                error={fieldErrors.phone}
               />
 
               <Field
@@ -178,11 +209,7 @@ export default function GuestDetailsBackfillScreen() {
               />
 
               {errorMsg && (
-                <Banner
-                  type="error"
-                  message={errorMsg}
-                  style={{ marginBottom: spacing.md }}
-                />
+                <Banner type="error" message={errorMsg} style={{ marginBottom: spacing.md }} />
               )}
 
               <View style={styles.buttonsRow}>
@@ -190,9 +217,18 @@ export default function GuestDetailsBackfillScreen() {
                   <Button
                     label="← Previous Guest"
                     variant="secondary"
-                    onPress={() => setCurrentIdx(currentIdx - 1)}
+                    onPress={() => goToGuest(currentIdx - 1)}
                   />
                 )}
+                <Button
+                  label={currentIdx === guestList.length - 1 ? 'Finish Later' : 'Skip for Now →'}
+                  variant="secondary"
+                  onPress={() =>
+                    currentIdx === guestList.length - 1
+                      ? router.replace(`/(app)/bookings/${id}` as any)
+                      : goToGuest(currentIdx + 1)
+                  }
+                />
                 <Button
                   label={
                     currentIdx === guestList.length - 1
@@ -207,44 +243,44 @@ export default function GuestDetailsBackfillScreen() {
             </View>
           )}
         </Card>
-      </ScrollView>
+      </View>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    padding: spacing.md
+    width: '100%',
   },
   progressRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: spacing.xs
+    marginBottom: spacing.xs,
   },
   progressText: {
     fontSize: typography.base,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
   },
   securityNotice: {
     fontSize: typography.xs,
-    marginBottom: spacing.md
+    marginBottom: spacing.md,
   },
   formSection: {
-    marginTop: spacing.sm
+    marginTop: spacing.sm,
   },
   badgeStrip: {
     padding: spacing.sm,
     borderRadius: 4,
-    marginBottom: spacing.md
+    marginBottom: spacing.md,
   },
   badgeStripText: {
-    fontSize: typography.sm
+    fontSize: typography.sm,
   },
   buttonsRow: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
     gap: spacing.sm,
-    marginTop: spacing.md
-  }
+    marginTop: spacing.md,
+  },
 });

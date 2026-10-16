@@ -16,33 +16,41 @@ export const Banner: React.FC<BannerProps> = ({
   type = 'info',
   actionLabel,
   onAction,
-  style
+  style,
 }) => {
   const colors = useThemeStore((s) => s.colors);
 
   const getColors = () => {
     switch (type) {
       case 'success':
-        return { bg: colors.green + '15', border: colors.green, text: colors.green };
+        return { bg: colors.greenSoft, accent: colors.green };
       case 'warning':
-        return { bg: colors.orange + '15', border: colors.orange, text: colors.orange };
+        return { bg: colors.orangeSoft, accent: colors.orange };
       case 'error':
-        return { bg: colors.red + '15', border: colors.red, text: colors.red };
+        return { bg: colors.redSoft, accent: colors.red };
       case 'offline':
-        return { bg: colors.grey + '15', border: colors.grey, text: colors.text };
+        return { bg: colors.greySoft, accent: colors.grey };
       default:
-        return { bg: colors.blue + '15', border: colors.blue, text: colors.blue };
+        return { bg: colors.blueSoft, accent: colors.blue };
     }
   };
 
   const c = getColors();
 
   return (
-    <View style={[styles.banner, { backgroundColor: c.bg, borderColor: c.border }, style]}>
-      <Text style={[styles.message, { color: c.text }]}>{message}</Text>
+    <View
+      accessibilityRole={type === 'error' ? 'alert' : undefined}
+      style={[styles.banner, { backgroundColor: c.bg, borderLeftColor: c.accent }, style]}
+    >
+      <Text style={[styles.message, { color: colors.text }]}>{message}</Text>
       {actionLabel && onAction ? (
-        <Pressable onPress={onAction} style={styles.action}>
-          <Text style={[styles.actionText, { color: c.text }]}>{actionLabel}</Text>
+        <Pressable
+          onPress={onAction}
+          accessibilityRole="button"
+          hitSlop={8}
+          style={styles.action}
+        >
+          <Text style={[styles.actionText, { color: c.accent }]}>{actionLabel}</Text>
         </Pressable>
       ) : null}
     </View>
@@ -51,25 +59,31 @@ export const Banner: React.FC<BannerProps> = ({
 
 const styles = StyleSheet.create({
   banner: {
-    padding: spacing.md,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.md,
     borderRadius: layout.borderRadius,
-    borderWidth: layout.borderWidth,
+    borderLeftWidth: 3,
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: spacing.md
+    gap: spacing.sm,
+    marginBottom: spacing.md,
   },
   message: {
     fontSize: typography.sm,
-    fontWeight: typography.weights.medium,
-    flex: 1
+    lineHeight: 20,
+    flexGrow: 1,
+    flexShrink: 1,
+    flexBasis: 220,
   },
   action: {
-    marginLeft: spacing.md
+    minHeight: 28,
+    justifyContent: 'center',
   },
   actionText: {
     fontSize: typography.sm,
-    fontWeight: typography.weights.bold,
-    textDecorationLine: 'underline'
-  }
+    fontWeight: typography.weights.semibold,
+    textDecorationLine: 'underline',
+  },
 });

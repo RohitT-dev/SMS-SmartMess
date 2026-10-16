@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useThemeStore } from '../../src/state/themeStore';
@@ -15,6 +15,15 @@ import { Dialog } from '../../src/ui/primitives/Dialog';
 import { spacing, typography } from '../../src/ui/tokens';
 import { supabase } from '../../src/lib/supabase';
 import { decryptRoomName } from '../../src/features/crypto-session/cryptoSession';
+import { userErrorMessage } from '../../src/lib/userError';
+import { addDaysToDateString, isValidDateString, localDateString } from '../../src/lib/dates';
+
+interface SuiteRow {
+  id: string;
+  name: string;
+  is_active: boolean;
+  stays: Array<{ id: string; checkIn: string; checkOut: string }>;
+}
 
 export default function SuitesManagementScreen() {
   const router = useRouter();
@@ -26,17 +35,17 @@ export default function SuitesManagementScreen() {
 
   const [selectedSuiteId, setSelectedSuiteId] = useState<string>('');
   const [showBookDialog, setShowBookDialog] = useState(false);
-  const [checkIn, setCheckIn] = useState(new Date().toISOString().split('T')[0]);
-  const defaultCheckOut = new Date();
-  defaultCheckOut.setDate(defaultCheckOut.getDate() + 3);
-  const [checkOut, setCheckOut] = useState(defaultCheckOut.toISOString().split('T')[0]);
+  const today = localDateString();
+  const [checkIn, setCheckIn] = useState(today);
+  const [checkOut, setCheckOut] = useState(addDaysToDateString(today, 3));
+  const datesValid = isValidDateString(checkIn) && isValidDateString(checkOut) && checkOut > checkIn;
   const [vipRank, setVipRank] = useState('AM');
   const [vipGender, setVipGender] = useState('M');
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Fetch suites (Only admin can query SUITE rooms per RLS policy)
-  const { data: suites, isLoading } = useQuery({
+  const { data: suites } = useQuery<SuiteRow[]>({
     queryKey: ['admin_suites_list'],
     queryFn: async () => {
       if (!isAdmin) return [];
@@ -46,12 +55,26 @@ export default function SuitesManagementScreen() {
         .eq('room_type', 'SUITE')
         .order('display_order');
       if (error) throw error;
+      const { data: allocs, error: allocErr } = await supabase
+        .from('allocations')
+        .select('*, bookings(*)')
+        .eq('status', 'ACTIVE');
+      if (allocErr) throw allocErr;
       return (data || []).map((r) => ({
-        ...r,
-        name: decryptRoomName(r.id, r.name_enc)
+        id: r.id as string,
+        is_active: r.is_active as boolean,
+        name: decryptRoomName(r.id, r.name_enc),
+        stays: ((allocs || []) as any[])
+          .filter((a) => a.room_id === r.id && a.bookings && a.bookings.check_out > today)
+          .map((a) => ({
+            id: a.id as string,
+            checkIn: a.bookings.check_in as string,
+            checkOut: a.bookings.check_out as string,
+          }))
+          .sort((a, b) => (a.checkIn < b.checkIn ? -1 : 1)),
       }));
     },
-    enabled: isAdmin
+    enabled: isAdmin,
   });
 
   const handleBookSuite = async () => {
@@ -65,14 +88,14 @@ export default function SuitesManagementScreen() {
           check_in: checkIn,
           check_out: checkOut,
           party_size: 1,
-          is_suite_booking: true
+          is_suite_booking: true,
         },
         p_guests: [
           {
             seq: 1,
             gender: vipGender,
-            rank_code: vipRank
-          }
+            rank_code: vipRank,
+          },
         ],
         p_allocations: [
           {
@@ -80,17 +103,18 @@ export default function SuitesManagementScreen() {
             room_id: selectedSuiteId,
             bed_slot: 1,
             check_in: checkIn,
-            check_out: checkOut
-          }
-        ]
+            check_out: checkOut,
+          },
+        ],
       });
 
       if (error) throw error;
       setShowBookDialog(false);
       queryClient.invalidateQueries({ queryKey: ['admin_suites_list'] });
+      queryClient.invalidateQueries({ queryKey: ['daily_room_state'] });
       router.push(`/(app)/bookings/${bookingId}/confirmed` as any);
     } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to book Suite');
+      setErrorMsg(userErrorMessage(err, 'Failed to book Suite'));
     } finally {
       setSubmitting(false);
     }
@@ -109,7 +133,7 @@ export default function SuitesManagementScreen() {
 
   return (
     <Screen title="AM / VVIP Suites" showBack={false}>
-      <ScrollView contentContainerStyle={styles.container}>
+      <View style={styles.container}>
         <Card>
           <View style={styles.header}>
             <View>
@@ -118,22 +142,46 @@ export default function SuitesManagementScreen() {
                 Executive suites are isolated from normal engine allotment and clerk booking.
               </Text>
             </View>
-            <Badge label="ADMIN ONLY" variant="warning" />
+            <Badge label="Admin only" variant="warning" />
           </View>
         </Card>
 
-        <Text style={[styles.sectionHeading, { color: colors.navy }]}>SUITE INVENTORY</Text>
+        <Text style={[styles.sectionHeading, { color: colors.navy }]}>Suite inventory</Text>
 
-        {(suites || []).map((suite) => (
+        {(suites || []).length === 0 && (
+          <Banner
+            type="info"
+            message="No suites exist yet. Add a room with the 'Executive Suite' classification under Rooms & Data."
+          />
+        )}
+
+        {(suites || []).map((suite) => {
+          const stays = suite.stays ?? [];
+          const occupiedToday = stays.some((st) => st.checkIn <= today && today < st.checkOut);
+          return (
           <Card key={suite.id} style={styles.suiteCard}>
             <View style={styles.suiteHeader}>
               <View style={styles.suiteTitleRow}>
                 <View style={[styles.saffronIndicator, { backgroundColor: colors.saffron }]} />
                 <Text style={[styles.suiteName, { color: colors.navy }]}>{suite.name}</Text>
-                <Badge label="SUITE" variant="warning" />
+                <Badge label="Suite" variant="warning" />
               </View>
-              <Badge label={suite.is_active ? 'READY' : 'OFFLINE'} variant={suite.is_active ? 'success' : 'default'} />
+              <Badge
+                label={!suite.is_active ? 'OFFLINE' : occupiedToday ? 'OCCUPIED' : 'READY'}
+                variant={!suite.is_active ? 'default' : occupiedToday ? 'warning' : 'success'}
+              />
             </View>
+
+            {stays.length > 0 && (
+              <View style={{ marginBottom: spacing.sm }}>
+                <Text style={[styles.subtitle, { color: colors.muted }]}>Booked stays</Text>
+                {stays.map((st) => (
+                  <Text key={st.id} style={{ color: colors.text, fontSize: typography.sm }}>
+                    {st.checkIn} → {st.checkOut}
+                  </Text>
+                ))}
+              </View>
+            )}
 
             <View style={styles.suiteActions}>
               <Button
@@ -141,12 +189,14 @@ export default function SuitesManagementScreen() {
                 variant="primary"
                 onPress={() => {
                   setSelectedSuiteId(suite.id);
+                  setErrorMsg(null);
                   setShowBookDialog(true);
                 }}
               />
             </View>
           </Card>
-        ))}
+          );
+        })}
 
         {/* Suite Booking Modal */}
         <Dialog
@@ -155,6 +205,7 @@ export default function SuitesManagementScreen() {
           message="Direct allocation for AM / Air Chief Marshal / VVIP. Creates a dedicated suite booking."
           confirmLabel="Confirm Suite Allotment"
           confirmVariant="primary"
+          disabled={!datesValid}
           onConfirm={handleBookSuite}
           onCancel={() => setShowBookDialog(false)}
           loading={submitting}
@@ -175,7 +226,7 @@ export default function SuitesManagementScreen() {
               { label: 'AM - Air Marshal', value: 'AM' },
               { label: 'ACM - Air Chief Marshal', value: 'ACM' },
               { label: 'MIAF - Marshal of the IAF', value: 'MIAF' },
-              { label: 'AVM - Air Vice Marshal', value: 'AVM' }
+              { label: 'AVM - Air Vice Marshal', value: 'AVM' },
             ]}
           />
 
@@ -185,70 +236,64 @@ export default function SuitesManagementScreen() {
             onChange={setVipGender}
             options={[
               { label: 'Male (M)', value: 'M' },
-              { label: 'Female (F)', value: 'F' }
+              { label: 'Female (F)', value: 'F' },
             ]}
           />
 
-          {errorMsg && (
-            <Banner
-              type="error"
-              message={errorMsg}
-              style={{ marginTop: spacing.sm }}
-            />
-          )}
+          {errorMsg && <Banner type="error" message={errorMsg} style={{ marginTop: spacing.sm }} />}
         </Dialog>
-      </ScrollView>
+      </View>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    padding: spacing.md
+    width: '100%',
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center'
+    alignItems: 'center',
   },
   title: {
     fontSize: typography.base,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
   },
   subtitle: {
     fontSize: typography.sm,
-    marginTop: 2
+    marginTop: 2,
   },
   sectionHeading: {
     fontSize: typography.sm,
     fontWeight: typography.weights.bold,
     marginTop: spacing.lg,
     marginBottom: spacing.xs,
-    letterSpacing: 0.5
+    letterSpacing: 0.5,
   },
   suiteCard: {
-    marginTop: spacing.sm
+    marginTop: spacing.sm,
   },
   suiteHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center'
+    alignItems: 'center',
   },
   suiteTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: spacing.sm
+    gap: spacing.sm,
   },
   saffronIndicator: {
     width: 4,
     height: 18,
-    borderRadius: 2
+    borderRadius: 2,
   },
   suiteName: {
     fontSize: typography.base,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
   },
   suiteActions: {
-    marginTop: spacing.md
-  }
+    marginTop: spacing.md,
+  },
 });

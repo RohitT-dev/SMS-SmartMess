@@ -1,12 +1,12 @@
 import React from 'react';
 import {
   Pressable,
+  PressableStateCallbackType,
   Text,
   StyleSheet,
   ActivityIndicator,
   ViewStyle,
-  TextStyle,
-  StyleProp
+  StyleProp,
 } from 'react-native';
 import { useThemeStore } from '../../state/themeStore';
 import { layout, spacing, typography } from '../tokens';
@@ -21,6 +21,9 @@ export interface ButtonProps {
   style?: StyleProp<ViewStyle>;
 }
 
+/** react-native-web adds hover/focus to the Pressable state; native only has `pressed`. */
+export type InteractionState = PressableStateCallbackType & { hovered?: boolean; focused?: boolean };
+
 export const Button: React.FC<ButtonProps> = ({
   label,
   onPress,
@@ -28,48 +31,52 @@ export const Button: React.FC<ButtonProps> = ({
   disabled = false,
   loading = false,
   accessibilityLabel,
-  style
+  style,
 }) => {
   const colors = useThemeStore((s) => s.colors);
+  const inactive = disabled || loading;
 
-  const getBackgroundColor = (pressed: boolean): string => {
-    if (disabled) return colors.border;
-    if (variant === 'primary') return pressed ? colors.navy : colors.blue;
-    if (variant === 'destructive') return pressed ? '#8E1D16' : colors.red;
-    return pressed ? colors.bg : colors.surface;
+  const getBackgroundColor = (active: boolean): string => {
+    if (disabled) return colors.greySoft;
+    if (variant === 'primary') return active ? colors.bluePressed : colors.blue;
+    if (variant === 'destructive') return active ? colors.redPressed : colors.red;
+    return active ? colors.surfaceAlt : colors.surface;
   };
 
-  const getTextColor = (): string => {
-    if (disabled) return colors.muted;
-    if (variant === 'primary' || variant === 'destructive') return '#FFFFFF';
-    return colors.navy;
-  };
+  const textColor = disabled
+    ? colors.muted
+    : variant === 'secondary'
+      ? colors.navy
+      : colors.onAction;
 
-  const getBorderColor = (): string => {
-    if (variant === 'secondary') return colors.border;
-    return 'transparent';
-  };
+  const borderColor =
+    variant === 'secondary' ? colors.borderStrong : disabled ? colors.border : 'transparent';
 
   return (
     <Pressable
       onPress={onPress}
-      disabled={disabled || loading}
+      disabled={inactive}
       accessible={true}
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel || label}
-      style={({ pressed }) => [
-        styles.button,
-        {
-          backgroundColor: getBackgroundColor(pressed),
-          borderColor: getBorderColor()
-        },
-        style
-      ]}
+      accessibilityState={{ disabled: inactive, busy: loading }}
+      style={(state) => {
+        const { pressed, hovered, focused } = state as InteractionState;
+        return [
+          styles.button,
+          {
+            backgroundColor: getBackgroundColor(!inactive && (pressed || !!hovered)),
+            borderColor,
+          },
+          focused ? { outlineColor: colors.focus, outlineWidth: 2, outlineStyle: 'solid', outlineOffset: 2 } as ViewStyle : null,
+          style,
+        ];
+      }}
     >
       {loading ? (
-        <ActivityIndicator color={getTextColor()} size="small" />
+        <ActivityIndicator color={textColor} size="small" />
       ) : (
-        <Text style={[styles.text, { color: getTextColor() }]}>{label}</Text>
+        <Text style={[styles.text, { color: textColor }]}>{label}</Text>
       )}
     </Pressable>
   );
@@ -84,10 +91,10 @@ const styles = StyleSheet.create({
     borderWidth: layout.borderWidth,
     justifyContent: 'center',
     alignItems: 'center',
-    flexDirection: 'row'
+    flexDirection: 'row',
   },
   text: {
     fontSize: typography.base,
-    fontWeight: typography.weights.medium
-  }
+    fontWeight: typography.weights.semibold,
+  },
 });

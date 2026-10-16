@@ -1,3 +1,4 @@
+export * from './AuthScreen';
 export * from './Badge';
 export * from './Banner';
 export * from './Button';
@@ -17,3 +18,5 @@ export * from './TabBar';
 export * from './Table';
 export * from './Tile';
 export * from './TopBar';
+export * from './Checkbox';
+export * from './Icon';

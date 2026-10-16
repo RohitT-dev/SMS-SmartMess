@@ -1,90 +1,89 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { Text, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useThemeStore } from '../../src/state/themeStore';
 import { Button } from '../../src/ui/primitives/Button';
 import { Card } from '../../src/ui/primitives/Card';
+import { Banner } from '../../src/ui/primitives/Banner';
+import { AuthScreen } from '../../src/ui/primitives/AuthScreen';
 import { spacing, typography } from '../../src/ui/tokens';
+import { logAction } from '../../src/lib/activityLog';
+import { resolvePostAuthRoute, signOut } from '../../src/features/auth/authFlow';
 
 export default function WaitingForAccessScreen() {
   const router = useRouter();
   const colors = useThemeStore((s) => s.colors);
   const [checking, setChecking] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleRecheck = () => {
+  const handleRecheck = async () => {
     setChecking(true);
-    setTimeout(() => {
+    setMessage(null);
+    setError(null);
+    try {
+      logAction('keys.access_recheck');
+      const next = await resolvePostAuthRoute();
+      if (next.pathname === '/(auth)/waiting-for-access') {
+        setMessage('No access code has been set yet. Ask an Administrator to set one.');
+      } else {
+        router.replace(next);
+      }
+    } catch (err: any) {
+      setError(err.message || 'Could not check authorization status');
+    } finally {
       setChecking(false);
-      router.replace('/(auth)/unlock');
-    }, 1000);
+    }
+  };
+
+  const handleSignOut = async () => {
+    await signOut();
+    router.replace('/(auth)/sign-in');
   };
 
   return (
-    <View style={[styles.container, { backgroundColor: colors.bg }]}>
-      <View style={styles.content}>
-        <View style={styles.header}>
-          <Text style={styles.icon}>⏳</Text>
-          <Text style={[styles.title, { color: colors.navy }]}>Waiting for Admin to Grant Access</Text>
-          <Text style={[styles.subtitle, { color: colors.muted }]}>
-            Zero-Knowledge Public Key Exchange Pending
-          </Text>
-        </View>
+    <AuthScreen
+      title="Waiting for an Access Code"
+      subtitle="Your Administrator has not set one yet"
+      icon="hourglass"
+    >
+      <Card style={styles.card}>
+        {error ? <Banner message={error} type="error" /> : null}
+        {message ? <Banner message={message} type="info" /> : null}
 
-        <Card style={styles.card}>
-          <Text style={[styles.bodyText, { color: colors.text }]}>
-            Your user account and cryptographic key pair have been registered. To maintain strict end-to-end security, an active Administrator must authorize your device by sealing the team master key to your public key.
-          </Text>
+        <Text style={[styles.bodyText, { color: colors.text }]}>
+          Your account is ready. After signing in, everyone enters an access code set by an
+          Administrator for the current period. None has been set yet. Ask an Administrator, then
+          check again.
+        </Text>
 
-          <Button
-            label="Check Authorization Status"
-            onPress={handleRecheck}
-            loading={checking}
-            style={styles.button}
-          />
-        </Card>
-      </View>
-    </View>
+        <Button
+          label="Check Again"
+          onPress={handleRecheck}
+          loading={checking}
+          style={styles.button}
+        />
+        <Button
+          label="Sign Out"
+          variant="secondary"
+          onPress={handleSignOut}
+          style={styles.button}
+        />
+      </Card>
+    </AuthScreen>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: spacing.lg
-  },
-  content: {
-    width: '100%',
-    maxWidth: 440
-  },
-  header: {
-    marginBottom: spacing.xl,
-    alignItems: 'center'
-  },
-  icon: {
-    fontSize: 40,
-    marginBottom: spacing.sm
-  },
-  title: {
-    fontSize: typography.xl,
-    fontWeight: typography.weights.bold,
-    textAlign: 'center'
-  },
-  subtitle: {
-    fontSize: typography.sm,
-    marginTop: spacing.xs,
-    textAlign: 'center'
-  },
   card: {
-    padding: spacing.xl
+    padding: spacing.lg,
   },
   bodyText: {
     fontSize: typography.sm,
     lineHeight: 22,
-    marginBottom: spacing.lg
+    marginBottom: spacing.md,
   },
   button: {
-    marginTop: spacing.sm
-  }
+    marginTop: spacing.sm,
+  },
 });

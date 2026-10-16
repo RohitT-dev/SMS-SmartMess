@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useThemeStore } from '../../../../src/state/themeStore';
 import { Screen } from '../../../../src/ui/primitives/Screen';
@@ -10,7 +10,13 @@ import { Banner } from '../../../../src/ui/primitives/Banner';
 import { Dialog } from '../../../../src/ui/primitives/Dialog';
 import { spacing, typography } from '../../../../src/ui/tokens';
 import { supabase } from '../../../../src/lib/supabase';
-import { encryptReason } from '../../../../src/features/crypto-session/cryptoSession';
+import { randomUUID } from 'expo-crypto';
+import { logAction } from '../../../../src/lib/activityLog';
+import { userErrorMessage } from '../../../../src/lib/userError';
+import {
+  encryptReason,
+  getActiveKeyVersion,
+} from '../../../../src/features/crypto-session/cryptoSession';
 import type { Category, GuestDemand } from '@sms/core';
 
 interface ParsedPayload {
@@ -18,6 +24,7 @@ interface ParsedPayload {
   checkIn: string;
   checkOut: string;
   guests: GuestDemand[];
+  preferSharing?: boolean;
   plan?: {
     kind: string;
     windows?: Array<{ checkIn: string; checkOut: string; roomsFree: number }>;
@@ -29,13 +36,18 @@ export default function BookingAlternatesScreen() {
   const router = useRouter();
   const colors = useThemeStore((s) => s.colors);
 
-  const parsed: ParsedPayload = payload ? JSON.parse(payload) : null;
-  const { category, checkIn, checkOut, guests, plan } = parsed || {
+  let parsed: ParsedPayload | null = null;
+  try {
+    parsed = payload ? (JSON.parse(payload) as ParsedPayload) : null;
+  } catch {
+    parsed = null;
+  }
+  const { category, checkIn, checkOut, guests, plan, preferSharing } = parsed || {
     category: 'LEAVE' as Category,
     checkIn: '',
     checkOut: '',
     guests: [],
-    plan: { kind: 'NONE', windows: [] }
+    plan: { kind: 'NONE', windows: [] },
   };
 
   const windows = plan?.windows || [];
@@ -55,9 +67,9 @@ export default function BookingAlternatesScreen() {
           category,
           checkIn,
           checkOut,
-          guests
-        })
-      }
+          guests,
+        }),
+      },
     } as any);
   };
 
@@ -66,7 +78,7 @@ export default function BookingAlternatesScreen() {
     setDenying(true);
     setErrorMessage(null);
     try {
-      const denialId = crypto.randomUUID();
+      const denialId = randomUUID();
       const reasonEnc = encryptReason('denials', 'reason_enc', denialId, denyReason.trim());
 
       const { error } = await supabase.rpc('record_denial', {
@@ -75,14 +87,21 @@ export default function BookingAlternatesScreen() {
         p_check_out: checkOut,
         p_party_size: guests.length,
         p_reason_enc: reasonEnc,
-        p_key_version: 1
+        p_key_version: getActiveKeyVersion(),
+        p_id: denialId,
       });
 
       if (error) throw error;
+      logAction('bookings.deny', {
+        entity: 'denials',
+        entityId: denialId,
+        meta: { category, party_size: guests.length },
+      });
       setShowDenyDialog(false);
+      setDenyReason('');
       router.replace('/(app)' as any);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Failed to record denial');
+      setErrorMessage(userErrorMessage(err, 'Failed to record denial'));
     } finally {
       setDenying(false);
     }
@@ -90,19 +109,17 @@ export default function BookingAlternatesScreen() {
 
   return (
     <Screen title="No Rooms Available" showBack={true}>
-      <ScrollView contentContainerStyle={styles.container}>
+      <View style={styles.container}>
         <Banner
           type="error"
-          message={`Full House: No continuous rooms free between ${checkIn} and ${checkOut} for ${guests.length} guest(s).`}
+          message={`Full house: no rooms are free for ${guests.length} guest${guests.length > 1 ? 's' : ''} from ${checkIn} to ${checkOut}.`}
         />
 
         {/* Section 1: Alternate Dates */}
         <Card style={{ marginTop: spacing.md }}>
-          <Text style={[styles.sectionTitle, { color: colors.navy }]}>
-            NEXT AVAILABLE DATES
-          </Text>
+          <Text style={[styles.sectionTitle, { color: colors.navy }]}>Next available dates</Text>
           <Text style={[styles.subtitle, { color: colors.muted }]}>
-            The system scanned ahead 90 days for continuous windows that fit your guests.
+            Same length of stay, scanned up to 90 days ahead. Tap one to go back to the booking form with those dates.
           </Text>
 
           {windows.length === 0 ? (
@@ -124,12 +141,14 @@ export default function BookingAlternatesScreen() {
                   label="Select Dates"
                   variant="secondary"
                   onPress={() => {
-                    router.push({
+                    // Back to the form with the same party and category, only the dates changed.
+                    router.replace({
                       pathname: '/(app)/bookings/new',
                       params: {
                         initialCheckIn: w.checkIn,
-                        initialCheckOut: w.checkOut
-                      }
+                        initialCheckOut: w.checkOut,
+                        draft: JSON.stringify({ category, guests, preferSharing }),
+                      },
                     } as any);
                   }}
                 />
@@ -140,7 +159,7 @@ export default function BookingAlternatesScreen() {
 
         {/* Section 2: Priority Handling / Eviction or Denial */}
         <Card style={{ marginTop: spacing.md }}>
-          <Text style={[styles.sectionTitle, { color: colors.navy }]}>RESOLUTION OPTIONS</Text>
+          <Text style={[styles.sectionTitle, { color: colors.navy }]}>Resolution options</Text>
 
           {isPriority ? (
             <View>
@@ -158,7 +177,8 @@ export default function BookingAlternatesScreen() {
           ) : (
             <View>
               <Text style={[styles.bodyText, { color: colors.text }]}>
-                Category {category} can be formally denied if alternate dates are not acceptable to the visitor.
+                Category {category} can be formally denied if alternate dates are not acceptable to
+                the visitor.
               </Text>
               <Button
                 label="Deny Request"
@@ -170,11 +190,7 @@ export default function BookingAlternatesScreen() {
           )}
 
           {errorMessage && (
-            <Banner
-              type="error"
-              message={errorMessage}
-              style={{ marginTop: spacing.md }}
-            />
+            <Banner type="error" message={errorMessage} style={{ marginTop: spacing.md }} />
           )}
         </Card>
 
@@ -185,8 +201,12 @@ export default function BookingAlternatesScreen() {
           message={`Deny ${category} booking request for ${checkIn} to ${checkOut} (${guests.length} person(s)). Written reason is required and will be encrypted.`}
           confirmLabel="Confirm Denial"
           confirmVariant="destructive"
+          disabled={!denyReason.trim()}
           onConfirm={handleConfirmDenial}
-          onCancel={() => setShowDenyDialog(false)}
+          onCancel={() => {
+            setShowDenyDialog(false);
+            setDenyReason('');
+          }}
           loading={denying}
         >
           <Field
@@ -197,27 +217,27 @@ export default function BookingAlternatesScreen() {
             multiline={true}
           />
         </Dialog>
-      </ScrollView>
+      </View>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    padding: spacing.md
+    width: '100%',
   },
   sectionTitle: {
     fontSize: typography.base,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
   },
   subtitle: {
     fontSize: typography.sm,
-    marginVertical: spacing.xs
+    marginVertical: spacing.xs,
   },
   emptyText: {
     fontSize: typography.sm,
     fontStyle: 'italic',
-    marginTop: spacing.sm
+    marginTop: spacing.sm,
   },
   windowRow: {
     flexDirection: 'row',
@@ -225,17 +245,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: spacing.sm,
     borderTopWidth: 1,
-    marginTop: spacing.sm
+    marginTop: spacing.sm,
   },
   windowDates: {
     fontSize: typography.sm,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
   },
   windowRooms: {
-    fontSize: typography.xs
+    fontSize: typography.xs,
   },
   bodyText: {
     fontSize: typography.sm,
-    marginBottom: spacing.sm
-  }
+    marginBottom: spacing.sm,
+  },
 });

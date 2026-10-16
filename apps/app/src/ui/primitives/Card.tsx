@@ -29,7 +29,7 @@ export const Card: React.FC<CardProps> = ({ children, style }) => {
 
 const styles = StyleSheet.create({
   card: {
-    borderRadius: layout.borderRadius,
+    borderRadius: layout.surfaceRadius,
     borderWidth: layout.borderWidth,
     padding: spacing.lg,
     marginBottom: spacing.md

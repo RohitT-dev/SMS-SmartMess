@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useThemeStore } from '../../../src/state/themeStore';
 import { useSessionStore } from '../../../src/state/sessionStore';
@@ -7,203 +7,339 @@ import { Screen } from '../../../src/ui/primitives/Screen';
 import { Card } from '../../../src/ui/primitives/Card';
 import { Button } from '../../../src/ui/primitives/Button';
 import { Field } from '../../../src/ui/primitives/Field';
-import { Badge } from '../../../src/ui/primitives/Badge';
 import { Banner } from '../../../src/ui/primitives/Banner';
 import { Dialog } from '../../../src/ui/primitives/Dialog';
 import { spacing, typography } from '../../../src/ui/tokens';
 import { supabase } from '../../../src/lib/supabase';
+import { logAction } from '../../../src/lib/activityLog';
+import { beginRotation, reencryptBatch, setSessionKey } from '@sms/crypto';
 import {
-  sealTeamKey,
-  verifyRecoveryCode,
-  generateRecoveryCode,
-  wrapTeamKeyWithRecoveryCode,
-  beginRotation,
-  reencryptBatch,
-  hexToBytes,
-  bytesToHex,
-  getRandomBytes
-} from '@sms/crypto';
-import {
-  getActiveTeamKey,
+  ACCESS_CODE_PATTERN,
+  changeAccessCode,
   getActiveKeyVersion,
-  getSubkey
+  getSubkey,
+  wrapTeamKeyForCode,
 } from '../../../src/features/crypto-session/cryptoSession';
+import { parseValidUntil } from '../../../src/features/auth/accessCode';
 
-export default function AdminKeysScreen() {
+const ROTATION_PAGE_SIZE = 200;
+
+interface PageRow {
+  pk: string;
+  ciphertext: string;
+  aadId?: string;
+}
+
+/** Keyset-paginates rows still on `currentVer` for a plain RLS-selectable table. */
+async function fetchReasonPage(
+  table: string,
+  column: string,
+  pkColumn: string,
+  currentVer: number,
+  after: string | null,
+  limit: number,
+): Promise<PageRow[]> {
+  let query = supabase
+    .from(table)
+    .select(`${pkColumn}, ${column}`)
+    .eq('key_version', currentVer)
+    .not(column, 'is', null)
+    .order(pkColumn, { ascending: true })
+    .limit(limit);
+  if (after) query = query.gt(pkColumn, after);
+
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data || []).map((r: any) => ({ pk: r[pkColumn], ciphertext: r[column] }));
+}
+
+/**
+ * Pages through a table's ciphertext column, re-encrypting and persisting
+ * each page under the new key version. Rows that fail to decrypt are
+ * reported in `failed` rather than aborting the rotation (see
+ * `reencryptBatch` in @sms/crypto).
+ */
+async function reencryptTable({
+  table,
+  column,
+  oldSubkey,
+  newSubkey,
+  currentVer,
+  newVersion,
+  fetchPage,
+}: {
+  table: string;
+  column: string;
+  oldSubkey: Uint8Array;
+  newSubkey: Uint8Array;
+  currentVer: number;
+  newVersion: number;
+  fetchPage: (after: string | null, limit: number) => Promise<PageRow[]>;
+}): Promise<{ succeeded: number; failed: Array<{ id: string; error: string }> }> {
+  let after: string | null = null;
+  let succeeded = 0;
+  const failed: Array<{ id: string; error: string }> = [];
+
+  while (true) {
+    const page = await fetchPage(after, ROTATION_PAGE_SIZE);
+    if (page.length === 0) break;
+
+    const result = reencryptBatch({
+      rows: page.map((r) => ({ id: r.pk, ciphertext: r.ciphertext, aadId: r.aadId })),
+      oldSubkey,
+      newSubkey,
+      oldVersion: currentVer,
+      newVersion,
+      table,
+      column,
+    });
+
+    if (result.succeeded.length > 0) {
+      const { error } = await supabase.rpc('reencrypt_batch', {
+        p_table: table,
+        p_column: column,
+        p_rows: result.succeeded.map((r) => ({ id: r.id, new_enc: r.newCiphertext })),
+      });
+      if (error) throw error;
+    }
+
+    succeeded += result.succeeded.length;
+    failed.push(...result.failed);
+
+    after = page[page.length - 1].pk;
+    if (page.length < ROTATION_PAGE_SIZE) break;
+  }
+
+  return { succeeded, failed };
+}
+
+export default function AdminAccessCodeScreen() {
   const colors = useThemeStore((s) => s.colors);
   const { userRole } = useSessionStore();
   const queryClient = useQueryClient();
 
   const isAdmin = userRole === 'admin';
 
-  // Test recovery code state
-  const [testCodeInput, setTestCodeInput] = useState('');
-  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
-  const [testingCode, setTestingCode] = useState(false);
+  // Set new access code
+  const [newCode, setNewCode] = useState('');
+  const [confirmCode, setConfirmCode] = useState('');
+  const [validUntil, setValidUntil] = useState('');
+  const [savingCode, setSavingCode] = useState(false);
+  const [codeResult, setCodeResult] = useState<{ ok: boolean; message: string } | null>(null);
 
-  // Key rotation state
+  // Key rotation
   const [showRotateDialog, setShowRotateDialog] = useState(false);
+  const [rotationCode, setRotationCode] = useState('');
   const [rotating, setRotating] = useState(false);
   const [rotationProgress, setRotationProgress] = useState<string | null>(null);
   const [rotationError, setRotationError] = useState<string | null>(null);
 
-  // Pending users waiting for team key access
-  const { data: pendingUsers, isLoading: loadingPending } = useQuery({
-    queryKey: ['pending_key_grants'],
+  const { data: codeInfo } = useQuery({
+    queryKey: ['access_code_info'],
     queryFn: async () => {
-      const currentVersion = getActiveKeyVersion();
-      const { data: keys, error } = await supabase
-        .from('user_keys')
-        .select('user_id, public_key, profiles(role, is_active)')
-        .eq('key_version', currentVersion);
+      const { data, error } = await supabase.rpc('access_code_info');
       if (error) throw error;
-
-      const { data: wraps } = await supabase
-        .from('user_key_wraps')
-        .select('user_id')
-        .eq('key_version', currentVersion);
-
-      const wrappedUserIds = new Set((wraps || []).map((w: any) => w.user_id));
-
-      return (keys || [])
-        .filter((k: any) => !wrappedUserIds.has(k.user_id) && k.profiles?.is_active)
-        .map((k: any) => ({
-          userId: k.user_id,
-          publicKey: k.public_key,
-          role: k.profiles?.role || 'clerk'
-        }));
+      return data as { version: number; valid_until: string | null; created_at: string } | null;
     },
-    enabled: isAdmin
+    enabled: isAdmin,
   });
 
-  // Action: Grant access to pending user
-  const handleGrantAccess = async (user: { userId: string; publicKey: string }) => {
-    try {
-      const teamKey = getActiveTeamKey();
-      const version = getActiveKeyVersion();
-      const recipientPubKey = hexToBytes(user.publicKey);
-      const sealed = sealTeamKey(teamKey, recipientPubKey);
-
-      const { error } = await supabase.rpc('grant_key_access', {
-        p_user_id: user.userId,
-        p_version: version,
-        p_sealed: sealed
-      });
-
-      if (error) throw error;
-      alert(`Granted team key access to user ${user.userId.slice(0, 8)}`);
-      queryClient.invalidateQueries({ queryKey: ['pending_key_grants'] });
-    } catch (err: any) {
-      alert('Failed to grant access: ' + err.message);
+  const handleSetCode = async () => {
+    setCodeResult(null);
+    if (!ACCESS_CODE_PATTERN.test(newCode)) {
+      setCodeResult({ ok: false, message: 'Access code must be 6 to 12 digits.' });
+      return;
     }
-  };
-
-  // Action: Test recovery code (non-destructive)
-  const handleTestRecoveryCode = async () => {
-    if (!testCodeInput.trim()) return;
-    setTestingCode(true);
-    setTestResult(null);
+    if (newCode !== confirmCode) {
+      setCodeResult({ ok: false, message: 'Codes do not match.' });
+      return;
+    }
     try {
-      // Fetch active recovery wrap from DB
-      const currentVer = getActiveKeyVersion();
-      const { data: verRow, error } = await supabase
-        .from('team_key_versions')
-        .select('recovery_wrap, recovery_kdf_salt, recovery_kdf_params')
-        .eq('version', currentVer)
-        .single();
-      if (error) throw error;
-
-      const isValid = verifyRecoveryCode(
-        verRow.recovery_wrap,
-        testCodeInput.trim(),
-        hexToBytes(verRow.recovery_kdf_salt),
-        verRow.recovery_kdf_params
-      );
-
-      if (isValid) {
-        setTestResult({
-          ok: true,
-          message: 'Recovery code verified successfully! It correctly unwraps the active team key.'
-        });
-      } else {
-        setTestResult({
-          ok: false,
-          message: 'Invalid recovery code. Verification failed.'
-        });
-      }
-    } catch (err: any) {
-      setTestResult({
-        ok: false,
-        message: err.message || 'Recovery code verification error'
+      setSavingCode(true);
+      const version = await changeAccessCode(newCode, parseValidUntil(validUntil));
+      logAction('access_code.changed', {
+        meta: { code_version: version, has_expiry: !!validUntil },
       });
+      setNewCode('');
+      setConfirmCode('');
+      setValidUntil('');
+      setCodeResult({
+        ok: true,
+        message:
+          'New access code is active. Everyone else must enter it the next time they unlock.',
+      });
+      queryClient.invalidateQueries({ queryKey: ['access_code_info'] });
+    } catch (err: any) {
+      logAction('access_code.change_failed');
+      setCodeResult({ ok: false, message: err.message || 'Could not save the access code.' });
     } finally {
-      setTestingCode(false);
+      setSavingCode(false);
     }
   };
 
-  // Action: Full Key Rotation
+  // Rotation: new random team key, re-encrypt every ciphertext column, then
+  // activate it wrapped under the access code entered in the dialog.
   const handleExecuteKeyRotation = async () => {
+    if (!ACCESS_CODE_PATTERN.test(rotationCode)) {
+      setRotationError('Enter the access code (6 to 12 digits) to wrap the new key with.');
+      return;
+    }
+    const code = rotationCode;
     setRotating(true);
     setRotationError(null);
-    setRotationProgress('Phase 1/4: Initializing new team key version...');
+    setRotationProgress('Phase 1/3: Creating new team key version...');
 
     try {
       const currentVer = getActiveKeyVersion();
       const rotation = beginRotation(currentVer);
+      const wrapped = wrapTeamKeyForCode(rotation.newTeamKey, code);
 
-      setRotationProgress('Phase 2/4: Generating recovery code for new key version...');
-      const recoveryCode = generateRecoveryCode();
-      const recoverySalt = getRandomBytes(16);
-      const recoveryParams = { m: 19456, t: 2, p: 1 };
-      const recoveryWrap = wrapTeamKeyWithRecoveryCode(
-        rotation.newTeamKey,
-        recoveryCode,
-        recoverySalt,
-        recoveryParams
-      );
-
-      // Register new version with backend
       const { error: beginErr } = await supabase.rpc('begin_rotation', {
         p_new_version: rotation.newVersion,
-        p_recovery_wrap: recoveryWrap,
-        p_recovery_salt: bytesToHex(recoverySalt),
-        p_recovery_params: recoveryParams
+        p_recovery_wrap: wrapped.wrap,
+        p_recovery_salt: wrapped.saltHex,
+        p_recovery_params: wrapped.params,
       });
       if (beginErr) throw beginErr;
 
-      // Re-encrypt rooms
-      setRotationProgress('Phase 3/4: Re-encrypting room names...');
-      const { data: roomRows } = await supabase.from('rooms').select('id, name_enc');
-      if (roomRows && roomRows.length > 0) {
-        const reencryptedRooms = reencryptBatch({
-          rows: roomRows.map((r: any) => ({ id: r.id, ciphertext: r.name_enc })),
-          oldSubkey: getSubkey('room-name'),
-          newSubkey: rotation.newSubkeys.roomName,
-          oldVersion: currentVer,
-          newVersion: rotation.newVersion,
-          table: 'rooms',
-          column: 'name_enc'
-        });
+      // Re-encrypt every ciphertext column, in pages, under the new subkeys.
+      // A row that fails to decrypt (e.g. a legacy eviction row whose AAD id
+      // was never persisted — see migration 0010) is skipped, not fatal: it
+      // is reported to the admin and left on the old key version rather than
+      // aborting the whole rotation.
+      const rotationFailures: Array<{ table: string; id: string; error: string }> = [];
 
-        const { error: batchErr } = await supabase.rpc('reencrypt_batch', {
-          p_table: 'rooms',
-          p_rows: reencryptedRooms.map((r) => ({ id: r.id, new_enc: r.newCiphertext }))
+      setRotationProgress('Phase 2/3: Re-encrypting room names...');
+      const roomsResult = await reencryptTable({
+        table: 'rooms',
+        column: 'name_enc',
+        oldSubkey: getSubkey('room-name'),
+        newSubkey: rotation.newSubkeys.roomName,
+        currentVer,
+        newVersion: rotation.newVersion,
+        fetchPage: (after, limit) =>
+          fetchReasonPage('rooms', 'name_enc', 'id', currentVer, after, limit),
+      });
+      rotationFailures.push(...roomsResult.failed.map((f) => ({ table: 'rooms', ...f })));
+
+      setRotationProgress('Phase 2/3: Re-encrypting guest PII and reasons...');
+
+      const guestPiiResult = await reencryptTable({
+        table: 'guest_pii',
+        column: 'pii_enc',
+        oldSubkey: getSubkey('pii'),
+        newSubkey: rotation.newSubkeys.pii,
+        currentVer,
+        newVersion: rotation.newVersion,
+        fetchPage: async (after, limit) => {
+          const { data, error } = await supabase.rpc('admin_page_guest_pii', {
+            p_key_version: currentVer,
+            p_after_guest_id: after,
+            p_limit: limit,
+          });
+          if (error) throw error;
+          return (data || []).map((r: any) => ({ pk: r.guest_id, ciphertext: r.pii_enc }));
+        },
+      });
+      rotationFailures.push(...guestPiiResult.failed.map((f) => ({ table: 'guest_pii', ...f })));
+
+      const bookingsResult = await reencryptTable({
+        table: 'bookings',
+        column: 'cancel_reason_enc',
+        oldSubkey: getSubkey('reason'),
+        newSubkey: rotation.newSubkeys.reason,
+        currentVer,
+        newVersion: rotation.newVersion,
+        fetchPage: (after, limit) =>
+          fetchReasonPage('bookings', 'cancel_reason_enc', 'id', currentVer, after, limit),
+      });
+      rotationFailures.push(...bookingsResult.failed.map((f) => ({ table: 'bookings', ...f })));
+
+      const denialsResult = await reencryptTable({
+        table: 'denials',
+        column: 'reason_enc',
+        oldSubkey: getSubkey('reason'),
+        newSubkey: rotation.newSubkeys.reason,
+        currentVer,
+        newVersion: rotation.newVersion,
+        fetchPage: (after, limit) =>
+          fetchReasonPage('denials', 'reason_enc', 'id', currentVer, after, limit),
+      });
+      rotationFailures.push(...denialsResult.failed.map((f) => ({ table: 'denials', ...f })));
+
+      const evictionsResult = await reencryptTable({
+        table: 'evictions',
+        column: 'reason_enc',
+        oldSubkey: getSubkey('reason'),
+        newSubkey: rotation.newSubkeys.reason,
+        currentVer,
+        newVersion: rotation.newVersion,
+        fetchPage: async (after, limit) => {
+          let query = supabase
+            .from('evictions')
+            .select('id, reason_enc, reason_aad_id')
+            .eq('key_version', currentVer)
+            .order('id', { ascending: true })
+            .limit(limit);
+          if (after) query = query.gt('id', after);
+          const { data, error } = await query;
+          if (error) throw error;
+          return (data || []).map((r: any) => ({
+            pk: r.id,
+            ciphertext: r.reason_enc,
+            aadId: r.reason_aad_id,
+          }));
+        },
+      });
+      rotationFailures.push(...evictionsResult.failed.map((f) => ({ table: 'evictions', ...f })));
+
+      const closuresResult = await reencryptTable({
+        table: 'room_closures',
+        column: 'reason_enc',
+        oldSubkey: getSubkey('reason'),
+        newSubkey: rotation.newSubkeys.reason,
+        currentVer,
+        newVersion: rotation.newVersion,
+        fetchPage: (after, limit) =>
+          fetchReasonPage('room_closures', 'reason_enc', 'id', currentVer, after, limit),
+      });
+      rotationFailures.push(
+        ...closuresResult.failed.map((f) => ({ table: 'room_closures', ...f })),
+      );
+
+      if (rotationFailures.length > 0) {
+        logAction('keys.rotation_unrecoverable_rows', {
+          meta: {
+            new_version: rotation.newVersion,
+            count: rotationFailures.length,
+            tables: Array.from(new Set(rotationFailures.map((f) => f.table))),
+          },
         });
-        if (batchErr) throw batchErr;
       }
 
-      // Finish rotation
-      setRotationProgress('Phase 4/4: Activating new key version...');
-      const { error: finishErr } = await supabase.rpc('finish_rotation', {
-        p_new_version: rotation.newVersion
+      setRotationProgress('Phase 3/3: Activating new key version...');
+      const { error: finishErr } = await supabase.rpc('finish_rotation_with_code', {
+        p_new_version: rotation.newVersion,
+        p_code: code,
       });
       if (finishErr) throw finishErr;
 
+      // Continue this session on the new key.
+      setSessionKey(rotation.newTeamKey, rotation.newVersion);
+      logAction('keys.rotation_completed', { meta: { new_version: rotation.newVersion } });
+      queryClient.invalidateQueries();
+
       setShowRotateDialog(false);
+      setRotationCode('');
+      const unrecoverableNote =
+        rotationFailures.length > 0
+          ? `\n\nWARNING: ${rotationFailures.length} row(s) in [${Array.from(new Set(rotationFailures.map((f) => f.table))).join(', ')}] could not be re-encrypted and remain on the old key version — see activity log "keys.rotation_unrecoverable_rows".`
+          : '';
       alert(
-        `Key rotation complete! Active version is now v${rotation.newVersion}. Please store your new emergency recovery code:\n\n${recoveryCode}`
+        `Key rotation complete. Active key version is now v${rotation.newVersion}. Staff must enter the access code again.${unrecoverableNote}`,
       );
     } catch (err: any) {
+      logAction('keys.rotation_failed');
       setRotationError(err.message || 'Key rotation failed');
     } finally {
       setRotating(false);
@@ -213,89 +349,83 @@ export default function AdminKeysScreen() {
 
   if (!isAdmin) {
     return (
-      <Screen title="Key Management" showBack={true}>
-        <Banner type="error" message="Unauthorized: Only Administrator may inspect cryptographic keys." />
+      <Screen title="Access Code" showBack={true}>
+        <Banner
+          type="error"
+          message="Unauthorized: only an Administrator can manage the access code."
+        />
       </Screen>
     );
   }
 
-  return (
-    <Screen title="Cryptographic Key Management" showBack={false}>
-      <ScrollView contentContainerStyle={styles.container}>
-        {/* Pending Access Card */}
-        <Card>
-          <Text style={[styles.title, { color: colors.navy }]}>
-            PENDING KEY ACCESS GRANTS ({pendingUsers?.length || 0})
-          </Text>
-          <Text style={[styles.subtitle, { color: colors.muted }]}>
-            When a new clerk signs up, their device generates an X25519 key pair. The Admin's device must seal the team key to their public key.
-          </Text>
+  const validUntilText = codeInfo?.valid_until
+    ? new Date(codeInfo.valid_until).toLocaleString()
+    : 'No expiry';
 
-          {loadingPending ? (
-            <Text style={{ fontStyle: 'italic', marginVertical: spacing.sm }}>
-              Checking pending users...
-            </Text>
-          ) : pendingUsers?.length === 0 ? (
-            <Text style={{ fontStyle: 'italic', marginVertical: spacing.sm, color: colors.muted }}>
-              All active staff members currently have sealed key access.
-            </Text>
-          ) : (
-            pendingUsers?.map((u) => (
-              <View key={u.userId} style={[styles.pendingRow, { borderColor: colors.border }]}>
-                <View>
-                  <Text style={[styles.userTitle, { color: colors.text }]}>
-                    User ID: {u.userId.slice(0, 8)}... ({u.role.toUpperCase()})
-                  </Text>
-                  <Text style={[styles.pubKeyText, { color: colors.muted }]}>
-                    Public Key: {u.publicKey.slice(0, 24)}...
-                  </Text>
-                </View>
-                <Button
-                  label="Grant Team Key Access"
-                  variant="primary"
-                  onPress={() => handleGrantAccess(u)}
-                />
-              </View>
-            ))
-          )}
+  return (
+    <Screen title="Access Code" showBack={false}>
+      <View style={styles.container}>
+        <Card>
+          <Text style={[styles.title, { color: colors.navy }]}>Current access code</Text>
+          <Text style={[styles.subtitle, { color: colors.muted }]}>
+            Staff enter this code after their email and password. The code itself is never stored or
+            shown, only its version and expiry.
+          </Text>
+          <Text style={[styles.infoLine, { color: colors.text }]}>
+            Version: {codeInfo ? `#${codeInfo.version}` : '—'}
+          </Text>
+          <Text style={[styles.infoLine, { color: colors.text }]}>
+            Valid until: {validUntilText}
+          </Text>
         </Card>
 
-        {/* Test Recovery Code */}
         <Card style={{ marginTop: spacing.md }}>
-          <Text style={[styles.title, { color: colors.navy }]}>TEST RECOVERY CODE (NON-DESTRUCTIVE)</Text>
+          <Text style={[styles.title, { color: colors.navy }]}>Set a new access code</Text>
           <Text style={[styles.subtitle, { color: colors.muted }]}>
-            Verify that your stored 160-bit recovery code successfully unwraps the active team key without modifying any database records.
+            Takes effect immediately. Everyone else is asked for the new code the next time they
+            unlock. Use 8 or more digits.
           </Text>
+
+          {codeResult ? (
+            <Banner type={codeResult.ok ? 'success' : 'error'} message={codeResult.message} />
+          ) : null}
 
           <Field
-            label="Enter Stored Recovery Code"
-            value={testCodeInput}
-            onChangeText={setTestCodeInput}
-            placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX"
-            autoCapitalize="characters"
+            label="New Access Code"
+            value={newCode}
+            onChangeText={(t) => setNewCode(t.replace(/[^0-9]/g, ''))}
+            keyboardType="number-pad"
+            secureTextEntry={true}
+            maxLength={12}
+            placeholder="6–12 digits"
           />
-
-          <Button
-            label="Verify Recovery Code"
-            variant="secondary"
-            loading={testingCode}
-            onPress={handleTestRecoveryCode}
+          <Field
+            label="Confirm New Code"
+            value={confirmCode}
+            onChangeText={(t) => setConfirmCode(t.replace(/[^0-9]/g, ''))}
+            keyboardType="number-pad"
+            secureTextEntry={true}
+            maxLength={12}
+            placeholder="Re-type code"
           />
-
-          {testResult && (
-            <Banner
-              type={testResult.ok ? 'success' : 'error'}
-              message={testResult.message}
-              style={{ marginTop: spacing.sm }}
-            />
-          )}
+          <Field
+            label="Valid Until (optional)"
+            value={validUntil}
+            onChangeText={setValidUntil}
+            autoCapitalize="none"
+            autoCorrect={false}
+            placeholder="YYYY-MM-DD — leave blank for no expiry"
+            hint="The code stops working for staff at the end of this day. Admins can still use it to set the next one."
+          />
+          <Button label="Save New Code" onPress={handleSetCode} loading={savingCode} />
         </Card>
 
-        {/* Key Rotation */}
         <Card style={{ marginTop: spacing.md }}>
-          <Text style={[styles.title, { color: colors.navy }]}>TEAM KEY ROTATION</Text>
+          <Text style={[styles.title, { color: colors.navy }]}>Team key rotation</Text>
           <Text style={[styles.subtitle, { color: colors.muted }]}>
-            Active Key Version: v{getActiveKeyVersion()}. Rotation generates a new random 256-bit team key, re-encrypts all database records in batches with resume capability, re-seals for active users, and flips the active version.
+            Active key version: v{getActiveKeyVersion()}. Generates a new encryption key and
+            re-encrypts every room name, guest record and reason with it. Changing the code alone
+            does not require this.
           </Text>
 
           <Button
@@ -306,62 +436,58 @@ export default function AdminKeysScreen() {
           />
         </Card>
 
-        {/* Rotate Dialog */}
         <Dialog
           visible={showRotateDialog}
           title="Rotate Team Key"
-          message="This operation will generate a new team key version, re-encrypt all ciphertext rows, and require updating the emergency recovery code."
-          confirmLabel="Execute Batch Rotation"
+          message="Re-encrypts all data under a new key. Enter the access code staff will use afterwards (the current code, or a new one)."
+          confirmLabel="Execute Rotation"
           confirmVariant="destructive"
           onConfirm={handleExecuteKeyRotation}
-          onCancel={() => setShowRotateDialog(false)}
+          onCancel={() => {
+            setShowRotateDialog(false);
+            setRotationCode('');
+            setRotationError(null);
+          }}
           loading={rotating}
         >
+          <Field
+            label="Access Code"
+            value={rotationCode}
+            onChangeText={(t) => setRotationCode(t.replace(/[^0-9]/g, ''))}
+            keyboardType="number-pad"
+            secureTextEntry={true}
+            maxLength={12}
+            placeholder="6–12 digits"
+          />
           {rotationProgress && (
             <Text style={{ fontSize: typography.sm, fontWeight: 'bold', color: colors.navy }}>
               {rotationProgress}
             </Text>
           )}
-
           {rotationError && (
-            <Banner
-              type="error"
-              message={rotationError}
-              style={{ marginTop: spacing.sm }}
-            />
+            <Banner type="error" message={rotationError} style={{ marginTop: spacing.sm }} />
           )}
         </Dialog>
-      </ScrollView>
+      </View>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    padding: spacing.md
+    width: '100%',
   },
   title: {
     fontSize: typography.base,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
   },
   subtitle: {
     fontSize: typography.sm,
     marginTop: 2,
-    marginBottom: spacing.sm
+    marginBottom: spacing.sm,
   },
-  pendingRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: spacing.sm,
-    borderTopWidth: 1
-  },
-  userTitle: {
+  infoLine: {
     fontSize: typography.sm,
-    fontWeight: typography.weights.bold
+    marginTop: spacing.xs,
   },
-  pubKeyText: {
-    fontSize: typography.xs,
-    fontFamily: 'monospace'
-  }
 });

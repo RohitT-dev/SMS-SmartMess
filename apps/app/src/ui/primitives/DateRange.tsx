@@ -1,7 +1,8 @@
 import React from 'react';
-import { View, Text, TextInput, StyleSheet } from 'react-native';
+import { View, Text, TextInput, StyleSheet, Platform } from 'react-native';
 import { useThemeStore } from '../../state/themeStore';
 import { layout, spacing, typography } from '../tokens';
+import { isValidDateString } from '../../lib/dates';
 
 export interface DateRangeProps {
   label?: string;
@@ -11,7 +12,67 @@ export interface DateRangeProps {
   onEndDateChange?: (date: string) => void;
   disabled?: boolean;
   error?: string;
+  startLabel?: string;
+  endLabel?: string;
+  /** Both dates are included in the range (reports); default is a stay: check-out day excluded. */
+  inclusive?: boolean;
+  /** Hide the "N nights · check-out morning is free" note (it only makes sense for a stay). */
+  hideNights?: boolean;
 }
+
+interface DateInputProps {
+  value: string;
+  onChange?: (v: string) => void;
+  accessibilityLabel: string;
+  disabled: boolean;
+  hasError: boolean;
+}
+
+/** Native date picker on web; plain YYYY-MM-DD text input on native. */
+const DateInput: React.FC<DateInputProps> = ({ value, onChange, accessibilityLabel, disabled, hasError }) => {
+  const colors = useThemeStore((s) => s.colors);
+  const isDark = useThemeStore((s) => s.isDark);
+  const borderColor = hasError ? colors.red : colors.borderStrong;
+
+  if (Platform.OS === 'web') {
+    return React.createElement('input', {
+      type: 'date',
+      value,
+      disabled: disabled || !onChange,
+      'aria-label': accessibilityLabel,
+      onChange: (e: { target: { value: string } }) => onChange?.(e.target.value),
+      style: {
+        height: layout.minTouchTarget,
+        width: '100%',
+        boxSizing: 'border-box',
+        border: `${layout.borderWidth}px solid ${borderColor}`,
+        borderRadius: layout.borderRadius,
+        padding: `0 ${spacing.sm}px`,
+        fontSize: typography.sm,
+        fontFamily: 'inherit',
+        color: colors.text,
+        backgroundColor: disabled ? colors.greySoft : colors.surface,
+        colorScheme: isDark ? 'dark' : 'light',
+      },
+    });
+  }
+
+  return (
+    <TextInput
+      value={value}
+      onChangeText={onChange}
+      placeholder="YYYY-MM-DD"
+      placeholderTextColor={colors.muted}
+      editable={!disabled && !!onChange}
+      accessibilityLabel={accessibilityLabel}
+      keyboardType="numbers-and-punctuation"
+      style={[
+        styles.input,
+        { backgroundColor: disabled ? colors.greySoft : colors.surface, borderColor, color: colors.text },
+      ]}
+    />
+  );
+};
 
 export const DateRange: React.FC<DateRangeProps> = ({
   label,
@@ -20,57 +81,63 @@ export const DateRange: React.FC<DateRangeProps> = ({
   onStartDateChange,
   onEndDateChange,
   disabled = false,
-  error
+  error,
+  startLabel = 'Check-In',
+  endLabel = 'Check-Out',
+  inclusive = false,
+  hideNights = false
 }) => {
   const colors = useThemeStore((s) => s.colors);
+
+  // Built-in validation so every screen shows the same message for bad ranges.
+  const startOk = isValidDateString(startDate);
+  const endOk = isValidDateString(endDate);
+  let derivedError = error;
+  let nights = 0;
+  if (!derivedError) {
+    if (!startOk || !endOk) derivedError = 'Enter both dates as YYYY-MM-DD.';
+    else if (inclusive ? endDate < startDate : endDate <= startDate)
+      derivedError = inclusive ? 'The end date can’t be before the start date.' : 'Check-out must be after check-in.';
+    else nights = Math.round((Date.parse(endDate) - Date.parse(startDate)) / 86400000);
+  }
 
   return (
     <View style={styles.container}>
       {label && <Text style={[styles.label, { color: colors.navy }]}>{label}</Text>}
       <View style={styles.inputsRow}>
         <View style={styles.inputWrapper}>
-          <Text style={[styles.subLabel, { color: colors.muted }]}>Check-In</Text>
-          <TextInput
+          <Text style={[styles.subLabel, { color: colors.muted }]}>{startLabel}</Text>
+          <DateInput
             value={startDate}
-            onChangeText={onStartDateChange}
-            placeholder="YYYY-MM-DD"
-            placeholderTextColor={colors.muted}
-            editable={!disabled && !!onStartDateChange}
-            accessibilityLabel="Check-in date YYYY-MM-DD"
-            style={[
-              styles.input,
-              {
-                backgroundColor: disabled ? colors.bg : colors.surface,
-                borderColor: error ? colors.red : colors.border,
-                color: colors.text
-              }
-            ]}
+            onChange={onStartDateChange}
+            accessibilityLabel={`${startLabel} date`}
+            disabled={disabled}
+            hasError={!!derivedError}
           />
         </View>
 
         <Text style={[styles.toSeparator, { color: colors.muted }]}>to</Text>
 
         <View style={styles.inputWrapper}>
-          <Text style={[styles.subLabel, { color: colors.muted }]}>Check-Out</Text>
-          <TextInput
+          <Text style={[styles.subLabel, { color: colors.muted }]}>{endLabel}</Text>
+          <DateInput
             value={endDate}
-            onChangeText={onEndDateChange}
-            placeholder="YYYY-MM-DD"
-            placeholderTextColor={colors.muted}
-            editable={!disabled && !!onEndDateChange}
-            accessibilityLabel="Check-out date YYYY-MM-DD"
-            style={[
-              styles.input,
-              {
-                backgroundColor: disabled ? colors.bg : colors.surface,
-                borderColor: error ? colors.red : colors.border,
-                color: colors.text
-              }
-            ]}
+            onChange={onEndDateChange}
+            accessibilityLabel={`${endLabel} date`}
+            disabled={disabled}
+            hasError={!!derivedError}
           />
         </View>
       </View>
-      {error && <Text style={[styles.error, { color: colors.red }]}>{error}</Text>}
+      {derivedError ? (
+        <Text style={[styles.error, { color: colors.red }]} accessibilityRole="alert">
+          {derivedError}
+        </Text>
+      ) : nights > 0 && !inclusive && !hideNights ? (
+        <Text style={[styles.subLabel, { color: colors.muted, marginTop: spacing.xs }]}>
+          {nights} night{nights === 1 ? '' : 's'} · check-out morning is free for the next guest
+        </Text>
+      ) : null}
     </View>
   );
 };

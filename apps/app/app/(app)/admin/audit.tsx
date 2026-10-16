@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, useWindowDimensions } from 'react-native';
 import { useQuery } from '@tanstack/react-query';
 import { useThemeStore } from '../../../src/state/themeStore';
 import { useSessionStore } from '../../../src/state/sessionStore';
@@ -7,16 +7,26 @@ import { Screen } from '../../../src/ui/primitives/Screen';
 import { Card } from '../../../src/ui/primitives/Card';
 import { Table } from '../../../src/ui/primitives/Table';
 import { Button } from '../../../src/ui/primitives/Button';
-import { Badge } from '../../../src/ui/primitives/Badge';
 import { Banner } from '../../../src/ui/primitives/Banner';
 import { spacing, typography } from '../../../src/ui/tokens';
 import { supabase } from '../../../src/lib/supabase';
+import { logAction } from '../../../src/lib/activityLog';
+import { Segmented } from '../../../src/ui/primitives/Segmented';
+import { Badge } from '../../../src/ui/primitives/Badge';
+import { describeAuditAction, NOISE_ACTIONS } from '../../../src/lib/auditLabels';
+import { userErrorMessage } from '../../../src/lib/userError';
+import { useAuthStore } from '../../../src/state/authStore';
 
 export default function AdminAuditScreen() {
   const colors = useThemeStore((s) => s.colors);
   const { userRole } = useSessionStore();
 
   const isAdmin = userRole === 'admin';
+  const { width } = useWindowDimensions();
+  const useCards = width < 960;
+  const myId = useAuthStore((st) => st.session?.user?.id);
+  const [filter, setFilter] = useState<'changes' | 'all'>('changes');
+  const [verifyError, setVerifyError] = useState<string | null>(null);
 
   const [verifying, setVerifying] = useState(false);
   const [chainStatus, setChainStatus] = useState<{
@@ -25,36 +35,37 @@ export default function AdminAuditScreen() {
   } | null>(null);
 
   // Fetch audit log entries
-  const { data: auditLogs, isLoading, refetch } = useQuery({
-    queryKey: ['admin_audit_logs'],
+  const { data: auditLogs, isLoading } = useQuery({
+    queryKey: ['admin_audit_logs', filter],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('audit_log')
-        .select('*')
-        .order('id', { ascending: false })
-        .limit(100);
+      let query = supabase.from('audit_log').select('*');
+      // Navigation and sign-in noise would otherwise push real changes out of the 100-row window.
+      if (filter === 'changes') for (const a of NOISE_ACTIONS) query = query.neq('action', a);
+      const { data, error } = await query.order('id', { ascending: false }).limit(100);
       if (error) throw error;
       return data || [];
     },
-    enabled: isAdmin
+    enabled: isAdmin,
   });
 
   const handleVerifyChain = async () => {
     setVerifying(true);
     setChainStatus(null);
+    setVerifyError(null);
     try {
       const { data, error } = await supabase.rpc('verify_audit_chain');
       if (error) throw error;
+      logAction('audit.verify_chain', { meta: { ok: data?.[0]?.ok ?? true } });
       if (data && data.length > 0) {
         setChainStatus({
           ok: data[0].ok,
-          first_bad_id: data[0].first_bad_id
+          first_bad_id: data[0].first_bad_id,
         });
       } else {
         setChainStatus({ ok: true, first_bad_id: null });
       }
     } catch (err: any) {
-      alert('Audit verification RPC error: ' + err.message);
+      setVerifyError(userErrorMessage(err, 'Could not verify the audit chain.'));
     } finally {
       setVerifying(false);
     }
@@ -63,20 +74,26 @@ export default function AdminAuditScreen() {
   if (!isAdmin) {
     return (
       <Screen title="Audit Trail" showBack={true}>
-        <Banner type="error" message="Unauthorized: Only Administrator may inspect cryptographic audit logs." />
+        <Banner
+          type="error"
+          message="Unauthorized: Only Administrator may inspect cryptographic audit logs."
+        />
       </Screen>
     );
   }
 
   return (
     <Screen title="Cryptographic Audit Trail" showBack={false}>
-      <ScrollView contentContainerStyle={styles.container}>
+      <View style={styles.container}>
         <Card>
           <View style={styles.topRow}>
-            <View>
-              <Text style={[styles.title, { color: colors.navy }]}>IMMUTABLE AUDIT LOG & HASH CHAIN</Text>
+            <View style={{ flex: 1, minWidth: 240 }}>
+              <Text style={[styles.title, { color: colors.navy }]}>
+                IMMUTABLE AUDIT LOG & HASH CHAIN
+              </Text>
               <Text style={[styles.subtitle, { color: colors.muted }]}>
-                Every state modification appends a SHA-256 chained entry. UPDATE and DELETE are blocked by triggers.
+                Every state modification appends a SHA-256 chained entry. UPDATE and DELETE are
+                blocked by triggers.
               </Text>
             </View>
             <Button
@@ -86,6 +103,8 @@ export default function AdminAuditScreen() {
               loading={verifying}
             />
           </View>
+
+          {verifyError && <Banner type="error" message={verifyError} style={{ marginTop: spacing.md }} />}
 
           {chainStatus && (
             <Banner
@@ -101,6 +120,44 @@ export default function AdminAuditScreen() {
         </Card>
 
         <Card style={{ marginTop: spacing.md }}>
+          <Segmented
+            value={filter}
+            onChange={(v) => setFilter(v as 'changes' | 'all')}
+            options={[
+              { label: 'Changes only', value: 'changes' },
+              { label: 'All activity', value: 'all' },
+            ]}
+          />
+        </Card>
+
+        {useCards ? (
+          <View style={{ marginTop: spacing.md, gap: spacing.sm }}>
+            {(auditLogs || []).length === 0 && (
+              <Text style={[styles.subtitle, { color: colors.muted }]}>
+                {isLoading ? 'Loading audit records…' : 'No audit records found.'}
+              </Text>
+            )}
+            {(auditLogs || []).map((row: any) => (
+              <Card key={row.id}>
+                <View style={styles.topRow}>
+                  <Text style={[styles.title, { color: colors.navy }]}>
+                    {describeAuditAction(row.action)}
+                  </Text>
+                  <Badge label={`#${row.id}`} variant="default" />
+                </View>
+                <Text style={[styles.subtitle, { color: colors.muted }]}>
+                  {new Date(row.at).toLocaleString()} • {row.actor ? (row.actor === myId ? 'you' : `staff #${String(row.actor).slice(-6).toUpperCase()}`) : 'system'}
+                </Text>
+                {row.meta && Object.keys(row.meta).length > 0 ? (
+                  <Text style={[styles.metaJson, { color: colors.text, marginTop: spacing.xs }]}>
+                    {JSON.stringify(row.meta)}
+                  </Text>
+                ) : null}
+              </Card>
+            ))}
+          </View>
+        ) : (
+        <Card style={{ marginTop: spacing.md }}>
           <Table
             columns={[
               { key: 'id', header: 'Seq ID', width: 70 },
@@ -112,9 +169,26 @@ export default function AdminAuditScreen() {
                   <Text style={{ fontSize: typography.xs }}>
                     {new Date(row.at).toLocaleString()}
                   </Text>
-                )
+                ),
               },
-              { key: 'action', header: 'Action', width: 140 },
+              {
+                key: 'action',
+                header: 'Action',
+                width: 190,
+                render: (row: any) => (
+                  <Text style={{ fontSize: typography.sm }}>{describeAuditAction(row.action)}</Text>
+                ),
+              },
+              {
+                key: 'actor',
+                header: 'By',
+                width: 110,
+                render: (row: any) => (
+                  <Text style={[styles.monoText, { color: colors.muted }]}>
+                    {row.actor ? (row.actor === myId ? 'you' : `#${String(row.actor).slice(-6).toUpperCase()}`) : 'system'}
+                  </Text>
+                ),
+              },
               { key: 'entity', header: 'Entity', width: 120 },
               {
                 key: 'entity_id',
@@ -124,7 +198,7 @@ export default function AdminAuditScreen() {
                   <Text style={[styles.monoText, { color: colors.muted }]}>
                     {row.entity_id ? `${row.entity_id.slice(0, 8)}...` : 'N/A'}
                   </Text>
-                )
+                ),
               },
               {
                 key: 'meta',
@@ -134,42 +208,45 @@ export default function AdminAuditScreen() {
                   <Text style={[styles.metaJson, { color: colors.text }]}>
                     {JSON.stringify(row.meta || {})}
                   </Text>
-                )
-              }
+                ),
+              },
             ]}
             data={auditLogs || []}
             keyExtractor={(row) => String(row.id)}
             emptyText={isLoading ? 'Loading audit records...' : 'No audit records found.'}
           />
         </Card>
-      </ScrollView>
+        )}
+      </View>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    padding: spacing.md
+    width: '100%',
   },
   topRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     justifyContent: 'space-between',
-    alignItems: 'center'
+    alignItems: 'center',
+    gap: spacing.sm,
   },
   title: {
     fontSize: typography.base,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
   },
   subtitle: {
     fontSize: typography.sm,
-    marginTop: 2
+    marginTop: 2,
   },
   monoText: {
     fontFamily: 'monospace',
-    fontSize: typography.xs
+    fontSize: typography.xs,
   },
   metaJson: {
     fontSize: typography.xs,
-    fontFamily: 'monospace'
-  }
+    fontFamily: 'monospace',
+  },
 });

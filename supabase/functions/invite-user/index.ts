@@ -60,7 +60,7 @@ serve(async (req: Request) => {
     // Service role admin client
     const adminClient = createClient(supabaseUrl, supabaseServiceRoleKey);
 
-    // Verify caller is active admin with AAL2 MFA
+    // Verify caller is an active admin (with AAL2 MFA when app_config.require_mfa is on)
     const { data: callerProfile, error: profileError } = await adminClient
       .from('profiles')
       .select('role, is_active')
@@ -70,6 +70,23 @@ serve(async (req: Request) => {
     if (profileError || !callerProfile || !callerProfile.is_active || callerProfile.role !== 'admin') {
       return new Response(
         JSON.stringify({ error: 'Forbidden: Caller must be an active Administrator' }),
+        { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // getUser() already verified the token signature, so the payload can be read directly.
+    let callerAal: string | undefined;
+    try {
+      const payload = authHeader.replace(/^Bearer\s+/i, '').split('.')[1];
+      const json = atob(payload.replace(/-/g, '+').replace(/_/g, '/'));
+      callerAal = JSON.parse(json).aal;
+    } catch {
+      callerAal = undefined;
+    }
+    const { data: mfaRequired } = await adminClient.rpc('mfa_required');
+    if (mfaRequired !== false && callerAal !== 'aal2') {
+      return new Response(
+        JSON.stringify({ error: 'Forbidden: MFA (AAL2) session required' }),
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       );
     }
@@ -125,8 +142,9 @@ serve(async (req: Request) => {
       });
     }
 
-    // 3. Write immutable audit log event
-    await adminClient.rpc('log_event', {
+    // 3. Write immutable audit log event (service role has no AAL2 session, so use
+    // the internal helper directly; log_event would reject it)
+    await adminClient.rpc('log_audit_event', {
       p_action: 'user_invited',
       p_entity: 'profiles',
       p_entity_id: newUserId,

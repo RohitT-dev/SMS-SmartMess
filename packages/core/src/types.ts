@@ -153,6 +153,12 @@ export interface BookingPlanRequest {
   guests: GuestDemand[];
   preferredRoomType?: RoomType;
   isSuiteBooking?: boolean;
+  /**
+   * Offer beds in already-shared rooms first: a lone guest is seated beside a compatible
+   * occupant (same gender and rank) before any empty room is opened. Applies across room
+   * types; the preferred type then only orders the remaining choices.
+   */
+  preferSharing?: boolean;
 }
 
 export interface PlannedAssignment {

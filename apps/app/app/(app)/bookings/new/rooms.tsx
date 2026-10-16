@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import React, { useCallback, useMemo, useState } from 'react';
+import { View, Text, StyleSheet } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery } from '@tanstack/react-query';
 import { useThemeStore } from '../../../../src/state/themeStore';
@@ -9,10 +9,14 @@ import { Button } from '../../../../src/ui/primitives/Button';
 import { Select } from '../../../../src/ui/primitives/Select';
 import { Banner } from '../../../../src/ui/primitives/Banner';
 import { Badge } from '../../../../src/ui/primitives/Badge';
+import { EmptyState } from '../../../../src/ui/primitives/EmptyState';
 import { spacing, typography } from '../../../../src/ui/tokens';
 import { supabase } from '../../../../src/lib/supabase';
+import { logAction } from '../../../../src/lib/activityLog';
+import { userErrorMessage } from '../../../../src/lib/userError';
+import { fetchRoomDayStates } from '../../../../src/features/bookings/roomState';
 import { decryptRoomName } from '../../../../src/features/crypto-session/cryptoSession';
-import type { Category, Gender, RankCode, GuestDemand } from '@sms/core';
+import type { Category, GuestDemand, RoomDayState } from '@sms/core';
 
 interface ParsedPayload {
   category: Category;
@@ -24,38 +28,61 @@ interface ParsedPayload {
   };
 }
 
+type Assignment = { roomId: string; bedSlot: 1 | 2 };
+
+function parsePayload(payload: string | undefined): ParsedPayload | null {
+  if (!payload) return null;
+  try {
+    return JSON.parse(payload) as ParsedPayload;
+  } catch {
+    return null;
+  }
+}
+
+/** What is already in a room for the whole requested stay. */
+interface RoomOccupancy {
+  closed: boolean;
+  takenBeds: Set<number>;
+  occupants: Array<{ gender: string; rankCode: string }>;
+}
+
+function summarizeOccupancy(states: RoomDayState[] | undefined): Record<string, RoomOccupancy> {
+  const out: Record<string, RoomOccupancy> = {};
+  for (const s of states ?? []) {
+    const o = (out[s.roomId] ??= { closed: false, takenBeds: new Set(), occupants: [] });
+    if (s.isClosed) o.closed = true;
+    for (const occ of s.occupants) {
+      o.takenBeds.add(occ.bedSlot);
+      if (!o.occupants.some((x) => x.gender === occ.gender && x.rankCode === occ.rankCode)) {
+        o.occupants.push({ gender: occ.gender, rankCode: occ.rankCode });
+      }
+    }
+  }
+  return out;
+}
+
 export default function MultiRoomAssignmentScreen() {
   const { payload } = useLocalSearchParams<{ payload: string }>();
   const router = useRouter();
   const colors = useThemeStore((s) => s.colors);
 
-  const parsed: ParsedPayload = payload ? JSON.parse(payload) : null;
-  const { category, checkIn, checkOut, guests, plan } = parsed || {
-    category: 'MSA' as Category,
-    checkIn: '',
-    checkOut: '',
-    guests: [],
-    plan: { assignments: [] }
-  };
+  const parsed = useMemo(() => parsePayload(payload), [payload]);
+  const category = parsed?.category ?? 'MSA';
+  const checkIn = parsed?.checkIn ?? '';
+  const checkOut = parsed?.checkOut ?? '';
+  const guests = useMemo(() => parsed?.guests ?? [], [parsed]);
 
-  // State for assignments: index -> { roomId, bedSlot }
-  const [assignments, setAssignments] = useState<
-    Record<number, { roomId: string; bedSlot: 1 | 2 }>
-  >(() => {
-    const init: Record<number, { roomId: string; bedSlot: 1 | 2 }> = {};
-    if (plan?.assignments) {
-      plan.assignments.forEach((a) => {
-        init[a.guestIndex] = { roomId: a.roomId, bedSlot: a.bedSlot };
-      });
-    }
+  const [assignments, setAssignments] = useState<Record<number, Assignment>>(() => {
+    const init: Record<number, Assignment> = {};
+    parsed?.plan?.assignments?.forEach((a) => {
+      init[a.guestIndex] = { roomId: a.roomId, bedSlot: a.bedSlot };
+    });
     return init;
   });
-
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
-  // Fetch available rooms
-  const { data: rooms } = useQuery({
+  const { data: rooms, isLoading: roomsLoading } = useQuery({
     queryKey: ['available_rooms_list'],
     queryFn: async () => {
       const { data, error } = await supabase
@@ -65,89 +92,68 @@ export default function MultiRoomAssignmentScreen() {
         .eq('is_active', true)
         .order('display_order');
       if (error) throw error;
-      return (data || []).map((r) => ({
-        ...r,
-        name: decryptRoomName(r.id, r.name_enc)
-      }));
-    }
-  });
-
-  // Fetch room daily states to detect existing occupants
-  const { data: rawStates } = useQuery({
-    queryKey: ['daily_room_state_raw', checkIn, checkOut],
-    queryFn: async () => {
-      const { data, error } = await supabase.rpc('daily_room_state', {
-        p_from: checkIn,
-        p_to: checkOut
-      });
-      if (error) throw error;
-      return (data || []) as any[];
+      return (data || []).map((r) => ({ ...r, name: decryptRoomName(r.id, r.name_enc) }));
     },
-    enabled: Boolean(checkIn && checkOut)
   });
 
-  // Validate assignments for sharing rules
-  const validateSharingRules = () => {
+  const { data: states } = useQuery({
+    queryKey: ['daily_room_state_manual', checkIn, checkOut],
+    queryFn: () => fetchRoomDayStates(checkIn, checkOut),
+    enabled: Boolean(checkIn && checkOut),
+  });
+  const occupancy = useMemo(() => summarizeOccupancy(states), [states]);
+
+  const roomName = useCallback(
+    (id: string) => rooms?.find((r) => r.id === id)?.name ?? 'room',
+    [rooms],
+  );
+
+  // Mirrors the server rules (closure, bed taken, same gender + rank in a shared room).
+  const validationErrors = useMemo(() => {
     const errors: string[] = [];
-    const roomSlots: Record<string, { guestIdx: number; gender: Gender; rankCode: RankCode; bedSlot: 1 | 2 }[]> = {};
+    const byRoom: Record<string, Array<{ idx: number; bedSlot: 1 | 2 }>> = {};
 
-    Object.entries(assignments).forEach(([idxStr, assign]) => {
-      const idx = Number(idxStr);
-      const guest = guests[idx];
-      if (!assign.roomId) {
-        errors.push(`Guest ${idx + 1} has not been assigned a room.`);
-        return;
+    guests.forEach((_, idx) => {
+      const a = assignments[idx];
+      if (!a?.roomId) return;
+      (byRoom[a.roomId] ??= []).push({ idx, bedSlot: a.bedSlot });
+    });
+
+    const unassigned = guests.filter((_, idx) => !assignments[idx]?.roomId).length;
+    if (unassigned > 0) {
+      errors.push(`${unassigned} guest${unassigned > 1 ? 's' : ''} still need${unassigned > 1 ? '' : 's'} a room.`);
+    }
+
+    for (const [roomId, list] of Object.entries(byRoom)) {
+      const name = roomName(roomId);
+      const occ = occupancy[roomId];
+      if (occ?.closed) errors.push(`${name} is out of service during these dates.`);
+
+      const slots = list.map((l) => l.bedSlot);
+      if (new Set(slots).size !== slots.length) {
+        errors.push(
+          `${list.map((l) => `Guest ${l.idx + 1}`).join(' and ')} are on the same bed in ${name}.`,
+        );
       }
-      if (!roomSlots[assign.roomId]) {
-        roomSlots[assign.roomId] = [];
-      }
-      roomSlots[assign.roomId].push({
-        guestIdx: idx,
-        gender: guest.gender,
-        rankCode: guest.rankCode,
-        bedSlot: assign.bedSlot
+      list.forEach((l) => {
+        if (occ?.takenBeds.has(l.bedSlot)) {
+          errors.push(`Bed ${l.bedSlot} in ${name} is already taken during these dates.`);
+        }
       });
-    });
 
-    // Check intra-booking sharing
-    Object.entries(roomSlots).forEach(([roomId, list]) => {
-      if (list.length > 2) {
-        errors.push(`Room has more than 2 guests assigned.`);
+      const profiles = [
+        ...list.map((l) => ({ gender: guests[l.idx].gender, rankCode: guests[l.idx].rankCode })),
+        ...(occ?.occupants ?? []),
+      ];
+      if (profiles.some((p) => p.gender !== profiles[0].gender || p.rankCode !== profiles[0].rankCode)) {
+        errors.push(
+          `${name}: guests sharing a room must have the same gender and rank${occ?.occupants.length ? ' (including the guest already staying there)' : ''}.`,
+        );
       }
-      if (list.length === 2) {
-        if (list[0].bedSlot === list[1].bedSlot) {
-          errors.push(`Guests ${list[0].guestIdx + 1} and ${list[1].guestIdx + 1} are assigned the same bed slot.`);
-        }
-        if (list[0].gender !== list[1].gender || list[0].rankCode !== list[1].rankCode) {
-          errors.push(
-            `ERR_SHARE_RULE: Guests ${list[0].guestIdx + 1} and ${list[1].guestIdx + 1} in the same room must have matching gender and rank.`
-          );
-        }
-      }
+    }
+    return Array.from(new Set(errors));
+  }, [assignments, guests, occupancy, roomName]);
 
-      // Check external occupancy overlap
-      if (rawStates) {
-        const occupied = rawStates.find((s: any) => s.room_id === roomId && s.beds_taken > 0);
-        if (occupied && list.length > 0) {
-          if (occupied.beds_taken >= 2) {
-            errors.push(`Room already has 2 existing occupants.`);
-          } else if (occupied.beds_taken === 1) {
-            const first = list[0];
-            if (occupied.occupant_gender && occupied.occupant_gender !== first.gender) {
-              errors.push(`ERR_SHARE_RULE: Gender mismatch with existing occupant in room.`);
-            }
-            if (occupied.occupant_rank && occupied.occupant_rank !== first.rankCode) {
-              errors.push(`ERR_SHARE_RULE: Rank mismatch with existing occupant in room.`);
-            }
-          }
-        }
-      }
-    });
-
-    return errors;
-  };
-
-  const validationErrors = validateSharingRules();
   const isValid = validationErrors.length === 0 && Object.keys(assignments).length === guests.length;
 
   const handleConfirm = async () => {
@@ -161,38 +167,66 @@ export default function MultiRoomAssignmentScreen() {
           check_in: checkIn,
           check_out: checkOut,
           party_size: guests.length,
-          is_suite_booking: false
+          is_suite_booking: false,
         },
         p_guests: guests.map((g, idx) => ({
           seq: idx + 1,
           gender: g.gender,
-          rank_code: g.rankCode
+          rank_code: g.rankCode,
         })),
         p_allocations: Object.entries(assignments).map(([idxStr, a]) => ({
           guest_seq: Number(idxStr) + 1,
           room_id: a.roomId,
           bed_slot: a.bedSlot,
           check_in: checkIn,
-          check_out: checkOut
-        }))
+          check_out: checkOut,
+        })),
       });
 
       if (error) throw error;
+      logAction('bookings.create', {
+        entity: 'bookings',
+        entityId: bookingId as string,
+        meta: { mode: 'manual' },
+      });
       router.replace(`/(app)/bookings/${bookingId}/confirmed` as any);
-    } catch (err: any) {
-      setSubmitError(err.message || 'Failed to complete multi-room booking');
+    } catch (err: unknown) {
+      setSubmitError(userErrorMessage(err, 'Failed to complete multi-room booking'));
     } finally {
       setSubmitting(false);
     }
   };
 
+  if (!parsed || guests.length === 0) {
+    return (
+      <Screen title="Customise Bed Placement" showBack={true}>
+        <EmptyState
+          title="Nothing to place"
+          description="Start from New Booking, choose guests and dates, then pick Customise Bed Placement."
+        />
+        <Button label="Go to New Booking" onPress={() => router.replace('/bookings/new')} />
+      </Screen>
+    );
+  }
+
+  const bedHint = (roomId: string) => {
+    const occ = occupancy[roomId];
+    if (!occ) return '';
+    if (occ.closed) return ' — out of service';
+    const free = [1, 2].filter((b) => !occ.takenBeds.has(b));
+    if (free.length === 2) return ' — both beds free';
+    if (free.length === 1) return ` — bed ${free[0]} free`;
+    return ' — full';
+  };
+
   return (
-    <Screen title="Multi-Room Assignment" showBack={true}>
-      <ScrollView contentContainerStyle={styles.container}>
+    <Screen title="Customise Bed Placement" showBack={true}>
+      <View style={styles.container}>
         <Card>
-          <Text style={[styles.title, { color: colors.navy }]}>ASSIGN GUESTS TO ROOMS & BEDS</Text>
+          <Text style={[styles.title, { color: colors.navy }]}>Assign guests to rooms and beds</Text>
           <Text style={[styles.subtitle, { color: colors.muted }]}>
-            Category: {category} • Dates: {checkIn} to {checkOut} • Total Guests: {guests.length}
+            {category} • {checkIn} → {checkOut} • {guests.length} guest
+            {guests.length > 1 ? 's' : ''}
           </Text>
 
           {validationErrors.length > 0 && (
@@ -204,60 +238,52 @@ export default function MultiRoomAssignmentScreen() {
           )}
 
           {submitError && (
-            <Banner
-              type="error"
-              message={submitError}
-              style={{ marginTop: spacing.md }}
-            />
+            <Banner type="error" message={submitError} style={{ marginTop: spacing.md }} />
+          )}
+
+          {roomsLoading && (
+            <Banner type="info" message="Loading rooms…" style={{ marginTop: spacing.md }} />
           )}
         </Card>
 
         {guests.map((g, idx) => {
-          const assign = assignments[idx] || { roomId: '', bedSlot: 1 };
+          const assign = assignments[idx] || { roomId: '', bedSlot: 1 as const };
           return (
             <Card key={idx} style={{ marginTop: spacing.md }}>
               <View style={styles.guestTitleRow}>
                 <Text style={[styles.guestTitle, { color: colors.navy }]}>
-                  Guest {idx + 1}: Rank {g.rankCode} • Gender {g.gender}
+                  Guest {idx + 1}: {g.rankCode} • {g.gender === 'M' ? 'Male' : 'Female'}
                 </Text>
-                <Badge label={`Bed ${assign.bedSlot}`} variant="default" />
+                {assign.roomId ? <Badge label={`Bed ${assign.bedSlot}`} variant="default" /> : null}
               </View>
 
-              <View style={styles.inputsRow}>
-                <View style={{ flex: 2 }}>
-                  <Select
-                    label="Assign Room"
-                    value={assign.roomId}
-                    onChange={(roomId: string) =>
-                      setAssignments({
-                        ...assignments,
-                        [idx]: { ...assign, roomId }
-                      })
-                    }
-                    options={(rooms || []).map((r) => ({
-                      label: `${r.name} (${r.room_type})`,
-                      value: r.id
-                    }))}
-                  />
-                </View>
+              <Select
+                label="Room"
+                value={assign.roomId}
+                onChange={(roomId: string) =>
+                  setAssignments({ ...assignments, [idx]: { ...assign, roomId } })
+                }
+                options={(rooms || []).map((r) => ({
+                  label: `${r.name} (${r.room_type.replace('_', ' ')})${bedHint(r.id)}`,
+                  value: r.id,
+                }))}
+                disabled={roomsLoading}
+              />
 
-                <View style={{ flex: 1 }}>
-                  <Select
-                    label="Bed Slot"
-                    value={String(assign.bedSlot)}
-                    onChange={(val: string) =>
-                      setAssignments({
-                        ...assignments,
-                        [idx]: { ...assign, bedSlot: Number(val) as 1 | 2 }
-                      })
-                    }
-                    options={[
-                      { label: 'Bed 1', value: '1' },
-                      { label: 'Bed 2', value: '2' }
-                    ]}
-                  />
-                </View>
-              </View>
+              <Select
+                label="Bed"
+                value={String(assign.bedSlot)}
+                onChange={(val: string) =>
+                  setAssignments({
+                    ...assignments,
+                    [idx]: { ...assign, bedSlot: Number(val) as 1 | 2 },
+                  })
+                }
+                options={[
+                  { label: 'Bed 1', value: '1' },
+                  { label: 'Bed 2', value: '2' },
+                ]}
+              />
             </Card>
           );
         })}
@@ -270,39 +296,35 @@ export default function MultiRoomAssignmentScreen() {
             onPress={handleConfirm}
           />
         </View>
-      </ScrollView>
+      </View>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    padding: spacing.md
+    width: '100%',
   },
   title: {
     fontSize: typography.base,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
   },
   subtitle: {
     fontSize: typography.sm,
-    marginTop: 4
+    marginTop: 4,
   },
   guestTitleRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: spacing.sm
+    marginBottom: spacing.sm,
   },
   guestTitle: {
     fontSize: typography.sm,
-    fontWeight: typography.weights.bold
-  },
-  inputsRow: {
-    flexDirection: 'row',
-    gap: spacing.sm
+    fontWeight: typography.weights.bold,
   },
   footerActions: {
     marginTop: spacing.xl,
-    marginBottom: spacing.xxl
-  }
+    marginBottom: spacing.xxl,
+  },
 });

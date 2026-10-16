@@ -21,16 +21,15 @@ export const MaskedValue: React.FC<MaskedValueProps> = ({
   onReveal,
   fallbackMask = '••••••••••••',
   maskedText,
-  canReveal = true
+  canReveal = true,
 }) => {
   const colors = useThemeStore((s) => s.colors);
-  const { revealGuest, isGuestRevealed } = useSessionStore();
+  const { revealGuest } = useSessionStore();
   const [revealedText, setRevealedText] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [countdown, setCountdown] = useState<number>(0);
 
   const guestId = id || 'masked-value';
-  const isRevealed = isGuestRevealed(guestId) || !!revealedText;
 
   useEffect(() => {
     let timer: any;
@@ -79,30 +78,30 @@ export const MaskedValue: React.FC<MaskedValueProps> = ({
             styles.valueText,
             {
               color: revealedText ? colors.text : colors.muted,
-              fontFamily: revealedText ? 'System' : 'monospace'
-            }
+              fontFamily: revealedText ? 'System' : 'monospace',
+            },
           ]}
         >
           {revealedText ? revealedText : displayText}
         </Text>
 
         {revealedText ? (
-          <View style={[styles.timerBadge, { backgroundColor: colors.saffron }]}>
-            <Text style={styles.timerText}>Masking in {countdown}s</Text>
+          <View style={[styles.timerBadge, { backgroundColor: colors.saffronSoft }]}>
+            <Text style={[styles.timerText, { color: colors.saffronInk }]}>Masking in {countdown}s</Text>
           </View>
         ) : canReveal ? (
           <Pressable
             onPress={handleReveal}
             disabled={loading}
-            style={[styles.revealBtn, { backgroundColor: colors.navy }]}
+            style={[styles.revealBtn, { borderColor: colors.borderStrong }]}
             accessible={true}
             accessibilityRole="button"
             accessibilityLabel={`Reveal ${label}`}
           >
             {loading ? (
-              <ActivityIndicator size="small" color="#FFFFFF" />
+              <ActivityIndicator size="small" color={colors.blue} />
             ) : (
-              <Text style={styles.revealBtnText}>Reveal (15s)</Text>
+              <Text style={[styles.revealBtnText, { color: colors.blue }]}>Reveal for 15s</Text>
             )}
           </Pressable>
         ) : null}
@@ -113,12 +112,12 @@ export const MaskedValue: React.FC<MaskedValueProps> = ({
 
 const styles = StyleSheet.create({
   container: {
-    marginVertical: spacing.xs
+    marginVertical: spacing.xs,
   },
   label: {
     fontSize: typography.xs,
-    textTransform: 'uppercase',
-    marginBottom: 2
+    fontWeight: typography.weights.medium,
+    marginBottom: 2,
   },
   box: {
     flexDirection: 'row',
@@ -128,30 +127,29 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
     borderWidth: layout.borderWidth,
     borderRadius: layout.borderRadius,
-    minHeight: layout.minTouchTarget
+    minHeight: layout.minTouchTarget,
   },
   valueText: {
     fontSize: typography.sm,
-    flex: 1
+    flex: 1,
   },
   revealBtn: {
     paddingHorizontal: spacing.sm,
     paddingVertical: 6,
-    borderRadius: layout.borderRadius
+    borderRadius: layout.borderRadius,
+    borderWidth: layout.borderWidth,
   },
   revealBtnText: {
-    color: '#FFFFFF',
     fontSize: typography.xs,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
   },
   timerBadge: {
-    paddingHorizontal: spacing.xs,
+    paddingHorizontal: spacing.sm,
     paddingVertical: 4,
-    borderRadius: layout.borderRadius
+    borderRadius: layout.borderRadius,
   },
   timerText: {
-    color: '#12283F',
     fontSize: typography.xs,
-    fontWeight: typography.weights.bold
-  }
+    fontWeight: typography.weights.bold,
+  },
 });

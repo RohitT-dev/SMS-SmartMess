@@ -1,12 +1,12 @@
 import React from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
 import { useThemeStore } from '../../../src/state/themeStore';
 import { Screen } from '../../../src/ui/primitives/Screen';
-import { Card } from '../../../src/ui/primitives/Card';
 import { Button } from '../../../src/ui/primitives/Button';
-import { spacing, typography } from '../../../src/ui/tokens';
+import { spacing } from '../../../src/ui/tokens';
 import { exportReportPdf } from '../../../src/features/reports/pdfGenerator';
+import { logAction } from '../../../src/lib/activityLog';
 import type { ReportDailyRow, ReportInsights } from '@sms/core';
 
 export default function PdfPreviewScreen() {
@@ -26,10 +26,10 @@ export default function PdfPreviewScreen() {
       msaPiSharePercentage: 0,
       bedsTotal: 92,
       denialCount: 0,
-      writtenInsights: []
+      writtenInsights: [],
     } as ReportInsights,
     dailyRows: [] as ReportDailyRow[],
-    denials: []
+    denials: [],
   };
 
   const handlePrint = async () => {
@@ -37,19 +37,16 @@ export default function PdfPreviewScreen() {
       periodLabel,
       insights,
       dailyRows,
-      denials
+      denials,
     });
+    logAction('reports.print_pdf', { meta: { period: periodLabel } });
   };
 
   return (
     <Screen title="PDF A4 Report Preview" showBack={true}>
-      <ScrollView contentContainerStyle={styles.container}>
+      <View style={styles.container}>
         <View style={styles.topActions}>
-          <Button
-            label="Print / Download PDF"
-            variant="primary"
-            onPress={handlePrint}
-          />
+          <Button label="Print / Download PDF" variant="primary" onPress={handlePrint} />
         </View>
 
         {/* A4 Sheet Simulation */}
@@ -57,7 +54,9 @@ export default function PdfPreviewScreen() {
           <View style={styles.sheetHeader}>
             <View>
               <Text style={styles.sheetTitle}>SMART MESS SYSTEM (SMS)</Text>
-              <Text style={styles.sheetSubtitle}>RESIDENTIAL OCCUPANCY & CAPACITY LEDGER REPORT</Text>
+              <Text style={styles.sheetSubtitle}>
+                RESIDENTIAL OCCUPANCY & CAPACITY LEDGER REPORT
+              </Text>
             </View>
             <View style={styles.sheetMeta}>
               <Text style={styles.metaText}>Period: {periodLabel}</Text>
@@ -78,7 +77,9 @@ export default function PdfPreviewScreen() {
             </View>
             <View style={styles.statBox}>
               <Text style={styles.statLabel}>PEAK OCCUPANCY</Text>
-              <Text style={styles.statVal}>{insights.peakCount} ({insights.peakOccupancyPercentage}%)</Text>
+              <Text style={styles.statVal}>
+                {insights.peakCount} ({insights.peakOccupancyPercentage}%)
+              </Text>
             </View>
             <View style={styles.statBox}>
               <Text style={styles.statLabel}>PRIORITY SHARE (MSA+PI)</Text>
@@ -90,7 +91,9 @@ export default function PdfPreviewScreen() {
 
           <Text style={styles.sectionTitle}>OPERATIONAL INSIGHTS</Text>
           {insights.writtenInsights?.map((line: string, i: number) => (
-            <Text key={i} style={styles.insightItem}>• {line}</Text>
+            <Text key={i} style={styles.insightItem}>
+              • {line}
+            </Text>
           ))}
 
           <View style={styles.divider} />
@@ -101,20 +104,20 @@ export default function PdfPreviewScreen() {
             </Text>
           </View>
         </View>
-      </ScrollView>
+      </View>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    padding: spacing.md,
-    alignItems: 'center'
+    width: '100%',
+    alignItems: 'center',
   },
   topActions: {
     width: '100%',
     maxWidth: 760,
-    marginBottom: spacing.md
+    marginBottom: spacing.md,
   },
   a4Sheet: {
     width: '100%',
@@ -124,79 +127,79 @@ const styles = StyleSheet.create({
     padding: spacing.xl,
     shadowColor: '#000000',
     shadowOpacity: 0.05,
-    shadowRadius: 8
+    shadowRadius: 8,
   },
   sheetHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'flex-start'
+    alignItems: 'flex-start',
   },
   sheetTitle: {
     fontSize: 18,
     fontWeight: 'bold',
-    color: '#12283F'
+    color: '#12283F',
   },
   sheetSubtitle: {
     fontSize: 12,
     color: '#5B6877',
-    marginTop: 2
+    marginTop: 2,
   },
   sheetMeta: {
-    alignItems: 'flex-end'
+    alignItems: 'flex-end',
   },
   metaText: {
     fontSize: 11,
-    color: '#5B6877'
+    color: '#5B6877',
   },
   divider: {
     height: 1,
     backgroundColor: '#DDE2E8',
-    marginVertical: spacing.md
+    marginVertical: spacing.md,
   },
   statGrid: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    gap: spacing.sm
+    gap: spacing.sm,
   },
   statBox: {
     flex: 1,
     padding: spacing.sm,
     backgroundColor: '#F4F6F8',
-    borderRadius: 4
+    borderRadius: 4,
   },
   statLabel: {
     fontSize: 9,
     fontWeight: 'bold',
-    color: '#5B6877'
+    color: '#5B6877',
   },
   statVal: {
     fontSize: 16,
     fontWeight: 'bold',
     color: '#12283F',
-    marginTop: 2
+    marginTop: 2,
   },
   sectionTitle: {
     fontSize: 13,
     fontWeight: 'bold',
     color: '#12283F',
-    marginBottom: spacing.xs
+    marginBottom: spacing.xs,
   },
   insightItem: {
     fontSize: 12,
     color: '#1B2733',
     lineHeight: 18,
-    marginBottom: 4
+    marginBottom: 4,
   },
   footer: {
     marginTop: spacing.xl,
     paddingTop: spacing.md,
     borderTopWidth: 1,
     borderColor: '#DDE2E8',
-    alignItems: 'center'
+    alignItems: 'center',
   },
   footerText: {
     fontSize: 10,
     color: '#8795A5',
-    letterSpacing: 0.5
-  }
+    letterSpacing: 0.5,
+  },
 });

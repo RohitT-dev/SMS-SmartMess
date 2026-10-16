@@ -1,156 +1,122 @@
 import {
+  argon2idKdf,
   deriveAllSubkeys,
-  deriveUserPassphraseKey,
-  generateUserKeyPair,
   getSessionKey,
-  openSealedTeamKey,
-  sealTeamKey,
   setSessionKey,
   unwrapPrivateKey,
-  unwrapTeamKeyWithRecoveryCode,
   wrapPrivateKey,
-  wrapTeamKeyWithRecoveryCode,
   decryptEnvelope,
   encryptEnvelope,
-  generateRecoveryCode,
   getRandomBytes,
   hexToBytes,
-  bytesToHex
+  bytesToHex,
+  computeBlindIndex,
 } from '@sms/crypto';
 import type { GuestPii } from '@sms/core';
 import { supabase } from '../../lib/supabase';
 import { useSessionStore } from '../../state/sessionStore';
 
-export interface KeySetupResult {
-  recoveryCode: string;
+const KDF_PARAMS = { m: 19456, t: 2, p: 1 };
+
+export const ACCESS_CODE_PATTERN = /^[0-9]{6,12}$/;
+
+const ACCESS_CODE_ERRORS: Record<string, string> = {
+  ERR_INVALID_CODE: 'Incorrect access code.',
+  ERR_CODE_EXPIRED: 'This access code has expired. Ask an Administrator for the new code.',
+  ERR_TOO_MANY_ATTEMPTS: 'Too many wrong codes. Try again in 15 minutes.',
+  ERR_NO_ACCESS_CODE: 'No access code has been set yet. Ask an Administrator.',
+  ERR_ACCOUNT_INACTIVE: 'Your account is not active. Contact an Administrator.',
+  ERR_MFA_REQUIRED: 'Two-factor authentication is required. Sign in again.',
+};
+
+export interface WrappedTeamKey {
+  wrap: string;
+  saltHex: string;
+  params: typeof KDF_PARAMS;
+}
+
+function deriveCodeKey(code: string, salt: Uint8Array, params: object = KDF_PARAMS): Uint8Array {
+  return argon2idKdf(code, salt, params as typeof KDF_PARAMS, 32);
+}
+
+/** Wraps a team key under an access code (Argon2id + XChaCha20-Poly1305). */
+export function wrapTeamKeyForCode(teamKey: Uint8Array, code: string): WrappedTeamKey {
+  const salt = getRandomBytes(16);
+  return {
+    wrap: wrapPrivateKey(teamKey, deriveCodeKey(code, salt)),
+    saltHex: bytesToHex(salt),
+    params: KDF_PARAMS,
+  };
+}
+
+function assertCodeFormat(code: string) {
+  if (!ACCESS_CODE_PATTERN.test(code)) {
+    throw new Error('Access code must be 6 to 12 digits.');
+  }
 }
 
 /**
- * Initializes the root team key on Admin's first run.
- * Creates master team key, user keypair, recovery wrap, and publishes keys.
+ * Checks the access code with the server (which marks this session as signed in)
+ * and loads the team key it unlocks into memory.
  */
-export async function initializeTeamKeySetup(passphrase: string): Promise<KeySetupResult> {
-  const {
-    data: { user }
-  } = await supabase.auth.getUser();
-  if (!user) throw new Error('Not authenticated');
+export async function unlockWithAccessCode(code: string): Promise<void> {
+  const trimmed = code.trim();
+  assertCodeFormat(trimmed);
 
-  // 1. Generate master team key & recovery code
+  const { data, error } = await supabase.rpc('verify_access_code', { p_code: trimmed });
+  if (error) throw error;
+  if (!data?.ok) {
+    const base = ACCESS_CODE_ERRORS[data?.error] || 'Access code could not be verified.';
+    const left = data?.error === 'ERR_INVALID_CODE' && typeof data.attempts_left === 'number';
+    throw new Error(left ? `${base} ${data.attempts_left} attempt(s) left.` : base);
+  }
+
+  const teamKey = unwrapPrivateKey(
+    data.team_key_wrap,
+    deriveCodeKey(trimmed, hexToBytes(data.kdf_salt), data.kdf_params),
+  );
+  setSessionKey(teamKey, data.team_key_version);
+  useSessionStore.getState().setUnlocked(true);
+}
+
+/** First run: the first Administrator creates the team key and the first access code. */
+export async function initializeWithAccessCode(
+  code: string,
+  validUntil: string | null,
+): Promise<void> {
+  const trimmed = code.trim();
+  assertCodeFormat(trimmed);
+
   const teamKey = getRandomBytes(32);
-  const recoveryCode = generateRecoveryCode();
-  const recoverySalt = getRandomBytes(16);
-  const recoveryWrap = wrapTeamKeyWithRecoveryCode(teamKey, recoveryCode, recoverySalt);
-
-  // 2. Insert team_key_versions row
-  const { error: teamKeyErr } = await supabase.from('team_key_versions').insert({
-    version: 1,
-    recovery_wrap: recoveryWrap,
-    recovery_kdf_salt: bytesToHex(recoverySalt),
-    recovery_kdf_params: { m: 19456, t: 2, p: 1 },
-    is_active: true
+  const wrapped = wrapTeamKeyForCode(teamKey, trimmed);
+  const { error } = await supabase.rpc('bootstrap_access', {
+    p_code: trimmed,
+    p_team_key_wrap: wrapped.wrap,
+    p_kdf_salt: wrapped.saltHex,
+    p_kdf_params: wrapped.params,
+    p_valid_until: validUntil,
   });
-  if (teamKeyErr) throw new Error(`Failed to store master key: ${teamKeyErr.message}`);
+  if (error) throw new Error(`Setup failed: ${error.message}`);
 
-  // 3. Generate user's X25519 keypair and wrap under passphrase
-  const userKeypair = generateUserKeyPair();
-  const userSalt = getRandomBytes(16);
-  const userPassKey = deriveUserPassphraseKey(passphrase, userSalt);
-  const encPrivKey = wrapPrivateKey(userKeypair.privateKey, userPassKey);
-
-  await supabase.rpc('publish_user_key', {
-    p_public_key: bytesToHex(userKeypair.publicKey),
-    p_enc_private_key: encPrivKey,
-    p_kdf_salt: bytesToHex(userSalt),
-    p_kdf_params: { m: 19456, t: 2, p: 1 },
-    p_key_version: 1
-  });
-
-  // 4. Seal team key to admin's own public key
-  const sealed = sealTeamKey(teamKey, userKeypair.publicKey);
-  await supabase.from('user_key_wraps').insert({
-    user_id: user.id,
-    key_version: 1,
-    sealed_team_key: sealed
-  });
-
-  // 5. Load into in-memory module closure
   setSessionKey(teamKey, 1);
   useSessionStore.getState().setUnlocked(true);
-
-  return { recoveryCode };
 }
 
-/**
- * Unlocks the session using the user's personal passphrase.
- */
-export async function unlockWithPassphrase(passphrase: string): Promise<void> {
-  const {
-    data: { user }
-  } = await supabase.auth.getUser();
-  if (!user) throw new Error('User not authenticated');
+/** Admin: sets the access code for the next period. Other users must enter it again. */
+export async function changeAccessCode(code: string, validUntil: string | null): Promise<number> {
+  const trimmed = code.trim();
+  assertCodeFormat(trimmed);
 
-  // 1. Fetch user's encrypted keypair
-  const { data: userKeyRow, error: keyErr } = await supabase
-    .from('user_keys')
-    .select('*')
-    .eq('user_id', user.id)
-    .single();
-
-  if (keyErr || !userKeyRow) {
-    throw new Error('User cryptographic key not found. First-time setup required.');
-  }
-
-  // 2. Derive passphrase key and unwrap private key
-  const salt = hexToBytes(userKeyRow.kdf_salt);
-  const passKey = deriveUserPassphraseKey(passphrase, salt, userKeyRow.kdf_params);
-  const userPrivateKey = unwrapPrivateKey(userKeyRow.enc_private_key, passKey);
-
-  // 3. Fetch active sealed team key
-  const { data: wrapRow, error: wrapErr } = await supabase
-    .from('user_key_wraps')
-    .select('sealed_team_key, key_version')
-    .eq('user_id', user.id)
-    .order('key_version', { ascending: false })
-    .limit(1)
-    .single();
-
-  if (wrapErr || !wrapRow) {
-    throw new Error('WAITING_FOR_ADMIN_GRANT');
-  }
-
-  // 4. Open sealed team key
-  const teamKey = openSealedTeamKey(wrapRow.sealed_team_key, userPrivateKey);
-
-  // 5. Store in memory closure
-  setSessionKey(teamKey, wrapRow.key_version);
-  useSessionStore.getState().setUnlocked(true);
-}
-
-/**
- * Restores access using the 160-bit master recovery code.
- */
-export async function recoverWithRecoveryCode(recoveryCode: string): Promise<void> {
-  // Fetch active team key version
-  const { data: versionRow, error } = await supabase
-    .from('team_key_versions')
-    .select('*')
-    .eq('is_active', true)
-    .single();
-
-  if (error || !versionRow) {
-    throw new Error('No active team key version found on server.');
-  }
-
-  const salt = hexToBytes(versionRow.recovery_kdf_salt);
-  const teamKey = unwrapTeamKeyWithRecoveryCode(
-    versionRow.recovery_wrap,
-    recoveryCode,
-    salt,
-    versionRow.recovery_kdf_params
-  );
-
-  setSessionKey(teamKey, versionRow.version);
-  useSessionStore.getState().setUnlocked(true);
+  const wrapped = wrapTeamKeyForCode(getActiveTeamKey(), trimmed);
+  const { data, error } = await supabase.rpc('set_access_code', {
+    p_code: trimmed,
+    p_team_key_wrap: wrapped.wrap,
+    p_kdf_salt: wrapped.saltHex,
+    p_kdf_params: wrapped.params,
+    p_valid_until: validUntil,
+  });
+  if (error) throw error;
+  return data as number;
 }
 
 /**
@@ -167,7 +133,7 @@ export function decryptRoomName(roomId: string, nameEnc: string): string {
       envelope: nameEnc,
       subkey: subkeys.roomName,
       aad,
-      allowedKeyVersions: [session.version]
+      allowedKeyVersions: [session.version],
     });
   } catch {
     return 'Decryption Error';
@@ -187,7 +153,7 @@ export function decryptGuestPii(guestId: string, piiEnc: string): GuestPii {
     envelope: piiEnc,
     subkey: subkeys.pii,
     aad,
-    allowedKeyVersions: [session.version]
+    allowedKeyVersions: [session.version],
   });
 
   return JSON.parse(decryptedJson) as GuestPii;
@@ -206,7 +172,7 @@ export function encryptGuestPii(guestId: string, pii: GuestPii): string {
     plaintext: JSON.stringify(pii),
     subkey: subkeys.pii,
     keyVersion: session.version,
-    aad
+    aad,
   });
 }
 
@@ -223,7 +189,7 @@ export function encryptRoomName(roomId: string, name: string): string {
     plaintext: name,
     subkey: subkeys.roomName,
     keyVersion: session.version,
-    aad
+    aad,
   });
 }
 
@@ -240,8 +206,31 @@ export function encryptReason(table: string, column: string, id: string, reason:
     plaintext: reason,
     subkey: subkeys.reason,
     keyVersion: session.version,
-    aad
+    aad,
   });
+}
+
+/**
+ * Decrypts a reason ciphertext (closures, denials, cancellations). Returns null when locked or unreadable.
+ */
+export function decryptReason(
+  table: string,
+  column: string,
+  id: string,
+  envelope: string | null | undefined,
+): string | null {
+  const session = getSessionKey();
+  if (!session || !envelope) return null;
+  try {
+    return decryptEnvelope({
+      envelope,
+      subkey: deriveAllSubkeys(session.teamKey).reason,
+      aad: `${table}.${column}.${id}`,
+      allowedKeyVersions: [session.version],
+    });
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -252,8 +241,7 @@ export function computeIdBlindIndex(idNumber: string): string {
   if (!session) throw new Error('Session is locked');
 
   const subkeys = deriveAllSubkeys(session.teamKey);
-  const { computeBlindIndex } = require('@sms/crypto');
-  return computeBlindIndex(idNumber, subkeys.blindIndex);
+  return computeBlindIndex(subkeys.blindIndex, idNumber);
 }
 
 export function getActiveTeamKey(): Uint8Array {

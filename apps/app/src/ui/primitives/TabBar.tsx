@@ -1,65 +1,84 @@
 import React from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { useRouter, usePathname } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useThemeStore } from '../../state/themeStore';
-import { layout, spacing, typography } from '../tokens';
+import { layout, typography } from '../tokens';
+import { NAV_ITEMS, isNavActive } from '../navigation';
+import { Icon, IconName } from './Icon';
 
 interface TabItem {
   label: string;
-  icon: string;
+  icon: IconName;
   path: string;
 }
 
 const TABS: TabItem[] = [
-  { label: 'Rooms', icon: '🛏️', path: '/' },
-  { label: 'Book', icon: '📝', path: '/bookings/new' },
-  { label: 'Report', icon: '📊', path: '/reports' },
-  { label: 'More', icon: '⚙️', path: '/settings' }
+  { label: 'Rooms', icon: 'bed', path: '/' },
+  { label: 'Book', icon: 'plus', path: '/bookings/new' },
+  { label: 'Ledger', icon: 'ledger', path: '/bookings' },
+  { label: 'Reports', icon: 'chart', path: '/reports' },
+  { label: 'More', icon: 'menu', path: '/more' },
 ];
+
+const TAB_PATHS = TABS.filter((t) => t.path !== '/more').map((t) => t.path);
+// Every other destination (admin pages, settings, suites) lives under "More".
+const MORE_PATHS = ['/more', ...NAV_ITEMS.map((n) => n.path).filter((p) => !TAB_PATHS.includes(p))];
 
 export const TabBar: React.FC = () => {
   const router = useRouter();
   const pathname = usePathname();
+  const insets = useSafeAreaInsets();
   const colors = useThemeStore((s) => s.colors);
 
   return (
     <View
+      accessibilityRole="tablist"
       style={[
         styles.tabBar,
         {
           backgroundColor: colors.surface,
-          borderTopColor: colors.border
-        }
+          borderTopColor: colors.border,
+          paddingBottom: insets.bottom,
+          height: 60 + insets.bottom,
+        },
       ]}
     >
       {TABS.map((tab) => {
         const isActive =
-          tab.path === '/'
-            ? pathname === '/'
-            : pathname.startsWith(tab.path);
+          tab.path === '/more'
+            ? MORE_PATHS.some((p) => isNavActive(p, pathname))
+            : isNavActive(tab.path, pathname);
 
         return (
           <Pressable
             key={tab.path}
-            onPress={() => router.push(tab.path as any)}
+            onPress={() => {
+              if (!isActive) router.navigate(tab.path as any);
+            }}
             accessible={true}
             accessibilityRole="tab"
             accessibilityState={{ selected: isActive }}
             accessibilityLabel={tab.label}
-            style={styles.tabButton}
+            style={({ pressed }) => [styles.tabButton, pressed && { opacity: 0.6 }]}
           >
-            {/* Active tab saffron indicator */}
             {isActive ? (
               <View style={[styles.activeIndicator, { backgroundColor: colors.saffron }]} />
             ) : null}
-            <Text style={{ fontSize: 18 }}>{tab.icon}</Text>
+            <Icon
+              name={tab.icon}
+              size={22}
+              color={isActive ? colors.navy : colors.muted}
+              strokeWidth={isActive ? 2 : 1.75}
+            />
             <Text
+              numberOfLines={1}
               style={[
                 styles.tabLabel,
                 {
                   color: isActive ? colors.navy : colors.muted,
-                  fontWeight: isActive ? typography.weights.bold : typography.weights.medium
-                }
+                  fontWeight: isActive ? typography.weights.semibold : typography.weights.regular,
+                },
               ]}
             >
               {tab.label}
@@ -73,19 +92,17 @@ export const TabBar: React.FC = () => {
 
 const styles = StyleSheet.create({
   tabBar: {
-    height: 60,
     borderTopWidth: layout.borderWidth,
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'stretch',
     justifyContent: 'space-around',
-    position: 'relative'
   },
   tabButton: {
     flex: 1,
-    height: '100%',
+    height: 60,
     justifyContent: 'center',
     alignItems: 'center',
-    minHeight: layout.minTouchTarget
+    minHeight: layout.minTouchTarget,
   },
   activeIndicator: {
     position: 'absolute',
@@ -94,10 +111,10 @@ const styles = StyleSheet.create({
     right: '20%',
     height: 3,
     borderBottomLeftRadius: 2,
-    borderBottomRightRadius: 2
+    borderBottomRightRadius: 2,
   },
   tabLabel: {
-    fontSize: typography.xs,
-    marginTop: 2
-  }
+    fontSize: 11,
+    marginTop: 3,
+  },
 });

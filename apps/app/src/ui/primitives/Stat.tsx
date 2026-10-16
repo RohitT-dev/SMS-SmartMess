@@ -36,7 +36,7 @@ export const Stat: React.FC<StatProps> = ({ label, value, indicatorColor }) => {
 const styles = StyleSheet.create({
   container: {
     padding: spacing.md,
-    borderRadius: layout.borderRadius,
+    borderRadius: layout.surfaceRadius,
     borderWidth: layout.borderWidth,
     flex: 1,
     minWidth: 120
@@ -54,11 +54,12 @@ const styles = StyleSheet.create({
   },
   label: {
     fontSize: typography.xs,
-    fontWeight: typography.weights.medium,
-    textTransform: 'uppercase'
+    fontWeight: typography.weights.medium
   },
   value: {
     fontSize: typography.xl,
-    fontWeight: typography.weights.bold
+    lineHeight: 34,
+    fontWeight: typography.weights.semibold,
+    ...typography.numeric
   }
 });

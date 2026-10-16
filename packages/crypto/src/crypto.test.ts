@@ -17,7 +17,6 @@ import {
   unwrapTeamKeyWithRecoveryCode,
   verifyRecoveryCode,
   computeBlindIndex,
-  normalizeIdNumber,
   setSessionKey,
   getSessionKey,
   clearSessionKey,
@@ -26,7 +25,6 @@ import {
   reencryptBatch,
   resealForUsers,
   getRandomBytes,
-  utf8ToBytes
 } from './index.ts';
 
 describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
@@ -40,7 +38,7 @@ describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
       plaintext,
       subkey: subkeys.pii,
       keyVersion: 1,
-      aad
+      aad,
     });
 
     assert.ok(envelope.startsWith('v1.1.'));
@@ -49,7 +47,7 @@ describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
       envelope,
       subkey: subkeys.pii,
       aad,
-      allowedKeyVersions: [1]
+      allowedKeyVersions: [1],
     });
 
     assert.strictEqual(decrypted, plaintext);
@@ -66,7 +64,7 @@ describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
       plaintext,
       subkey,
       keyVersion: 1,
-      aad: aadRow1
+      aad: aadRow1,
     });
 
     assert.throws(() => {
@@ -74,7 +72,7 @@ describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
         envelope,
         subkey,
         aad: aadRow2,
-        allowedKeyVersions: [1]
+        allowedKeyVersions: [1],
       });
     }, /tag|AAD/i);
   });
@@ -88,7 +86,7 @@ describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
       plaintext: 'test',
       subkey,
       keyVersion: 1,
-      aad
+      aad,
     });
 
     assert.throws(() => {
@@ -96,7 +94,7 @@ describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
         envelope,
         subkey,
         aad,
-        allowedKeyVersions: [2] // Version 1 is not allowed
+        allowedKeyVersions: [2], // Version 1 is not allowed
       });
     }, /Key version mismatch/i);
   });
@@ -112,14 +110,14 @@ describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
       plaintext: 'secure text',
       subkey: subkey1,
       keyVersion: 1,
-      aad
+      aad,
     });
 
     assert.throws(() => {
       decryptEnvelope({
         envelope,
         subkey: subkey2,
-        aad
+        aad,
       });
     });
   });
@@ -172,7 +170,10 @@ describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
 
     // Test recovery code without side-effects (verifyRecoveryCode)
     assert.strictEqual(verifyRecoveryCode(recoveryWrap, recoveryCode, salt), true);
-    assert.strictEqual(verifyRecoveryCode(recoveryWrap, 'WRON-GCOD-E000-0000-0000-0000-0000-0000', salt), false);
+    assert.strictEqual(
+      verifyRecoveryCode(recoveryWrap, 'WRON-GCOD-E000-0000-0000-0000-0000-0000', salt),
+      false,
+    );
 
     // Normalizing handles case and dashes
     const lowercaseCodeWithSpaces = recoveryCode.toLowerCase().replace(/-/g, ' ');
@@ -226,14 +227,14 @@ describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
       plaintext: 'Room 101',
       subkey: v1Subkeys.roomName,
       keyVersion: 1,
-      aad: row1Aad
+      aad: row1Aad,
     });
 
     const ct2 = encryptEnvelope({
       plaintext: 'Room 102',
       subkey: v1Subkeys.roomName,
       keyVersion: 1,
-      aad: row2Aad
+      aad: row2Aad,
     });
 
     // Begin rotation to v2
@@ -244,35 +245,127 @@ describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
     const reencrypted = reencryptBatch({
       rows: [
         { id: 'room-101', ciphertext: ct1 },
-        { id: 'room-102', ciphertext: ct2 }
+        { id: 'room-102', ciphertext: ct2 },
       ],
       oldSubkey: v1Subkeys.roomName,
       newSubkey: rotation.newSubkeys.roomName,
       oldVersion: 1,
       newVersion: 2,
       table: 'rooms',
-      column: 'name_enc'
+      column: 'name_enc',
     });
 
-    assert.strictEqual(reencrypted.length, 2);
-    assert.ok(reencrypted[0].newCiphertext.startsWith('v1.2.'));
+    assert.strictEqual(reencrypted.succeeded.length, 2);
+    assert.strictEqual(reencrypted.failed.length, 0);
+    assert.ok(reencrypted.succeeded[0].newCiphertext.startsWith('v1.2.'));
 
     // Check newly encrypted data decrypts with v2
     const dec1 = decryptEnvelope({
-      envelope: reencrypted[0].newCiphertext,
+      envelope: reencrypted.succeeded[0].newCiphertext,
       subkey: rotation.newSubkeys.roomName,
       aad: row1Aad,
-      allowedKeyVersions: [2]
+      allowedKeyVersions: [2],
     });
     assert.strictEqual(dec1, 'Room 101');
 
     // Reseal for active users
     const clerk = generateUserKeyPair();
-    const sealedWraps = resealForUsers([{ userId: 'clerk-uuid', publicKey: clerk.publicKey }], rotation.newTeamKey, 2);
+    const sealedWraps = resealForUsers(
+      [{ userId: 'clerk-uuid', publicKey: clerk.publicKey }],
+      rotation.newTeamKey,
+      2,
+    );
     assert.strictEqual(sealedWraps.length, 1);
     assert.strictEqual(sealedWraps[0].keyVersion, 2);
 
     const unsealed = openSealedTeamKey(sealedWraps[0].sealedTeamKey, clerk.privateKey);
     assert.deepStrictEqual(unsealed, rotation.newTeamKey);
+  });
+
+  it('Key rotation: reencryptBatch uses aadId (not row id) for shared eviction reasons', () => {
+    const v1TeamKey = getRandomBytes(32);
+    const v1Subkeys = deriveAllSubkeys(v1TeamKey);
+
+    // One eviction reason, shared ciphertext, bound into two rows (one per
+    // evicted allocation) that each have a *different* primary key but the
+    // *same* reason_aad_id.
+    const reasonAadId = 'eviction-batch-aad-id';
+    const sharedAad = `evictions.reason_enc.${reasonAadId}`;
+    const sharedCiphertext = encryptEnvelope({
+      plaintext: 'Medical emergency bed reassignment',
+      subkey: v1Subkeys.reason,
+      keyVersion: 1,
+      aad: sharedAad,
+    });
+
+    const rotation = beginRotation(1);
+    const result = reencryptBatch({
+      rows: [
+        { id: 'eviction-row-1', ciphertext: sharedCiphertext, aadId: reasonAadId },
+        { id: 'eviction-row-2', ciphertext: sharedCiphertext, aadId: reasonAadId },
+      ],
+      oldSubkey: v1Subkeys.reason,
+      newSubkey: rotation.newSubkeys.reason,
+      oldVersion: 1,
+      newVersion: 2,
+      table: 'evictions',
+      column: 'reason_enc',
+    });
+
+    assert.strictEqual(result.failed.length, 0);
+    assert.strictEqual(result.succeeded.length, 2);
+    assert.strictEqual(result.succeeded[0].id, 'eviction-row-1');
+    assert.strictEqual(result.succeeded[1].id, 'eviction-row-2');
+
+    const dec = decryptEnvelope({
+      envelope: result.succeeded[0].newCiphertext,
+      subkey: rotation.newSubkeys.reason,
+      aad: sharedAad,
+      allowedKeyVersions: [2],
+    });
+    assert.strictEqual(dec, 'Medical emergency bed reassignment');
+  });
+
+  it('Key rotation: reencryptBatch reports unrecoverable rows instead of aborting the batch', () => {
+    const v1TeamKey = getRandomBytes(32);
+    const v1Subkeys = deriveAllSubkeys(v1TeamKey);
+
+    const goodAad = 'bookings.cancel_reason_enc.booking-good';
+    const goodCiphertext = encryptEnvelope({
+      plaintext: 'Guest requested cancellation',
+      subkey: v1Subkeys.reason,
+      keyVersion: 1,
+      aad: goodAad,
+    });
+
+    // Encrypted with a different AAD than the one reencryptBatch will derive
+    // from `id` — simulates a legacy row whose original AAD id was never
+    // persisted (the pre-fix evictions bug).
+    const mismatchedCiphertext = encryptEnvelope({
+      plaintext: 'Unrecoverable legacy reason',
+      subkey: v1Subkeys.reason,
+      keyVersion: 1,
+      aad: 'bookings.cancel_reason_enc.some-other-id',
+    });
+
+    const rotation = beginRotation(1);
+    const result = reencryptBatch({
+      rows: [
+        { id: 'booking-good', ciphertext: goodCiphertext },
+        { id: 'booking-bad', ciphertext: mismatchedCiphertext },
+      ],
+      oldSubkey: v1Subkeys.reason,
+      newSubkey: rotation.newSubkeys.reason,
+      oldVersion: 1,
+      newVersion: 2,
+      table: 'bookings',
+      column: 'cancel_reason_enc',
+    });
+
+    assert.strictEqual(result.succeeded.length, 1);
+    assert.strictEqual(result.succeeded[0].id, 'booking-good');
+    assert.strictEqual(result.failed.length, 1);
+    assert.strictEqual(result.failed[0].id, 'booking-bad');
+    assert.ok(result.failed[0].error.length > 0);
   });
 });

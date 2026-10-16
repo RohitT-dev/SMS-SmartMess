@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useThemeStore } from '../../../../src/state/themeStore';
 import { Screen } from '../../../../src/ui/primitives/Screen';
 import { Card } from '../../../../src/ui/primitives/Card';
+import { Icon } from '../../../../src/ui/primitives/Icon';
 import { Button } from '../../../../src/ui/primitives/Button';
 import { Badge } from '../../../../src/ui/primitives/Badge';
 import { spacing, typography } from '../../../../src/ui/tokens';
@@ -26,7 +27,7 @@ export default function BookingConfirmedScreen() {
         .single();
       if (error) throw error;
       return data;
-    }
+    },
   });
 
   return (
@@ -34,10 +35,10 @@ export default function BookingConfirmedScreen() {
       <View style={styles.container}>
         <Card style={styles.card}>
           <View style={[styles.successIconCircle, { backgroundColor: colors.green }]}>
-            <Text style={styles.checkmark}>✓</Text>
+            <Icon name="check" size={32} color={colors.onAction} strokeWidth={2.5} />
           </View>
 
-          <Text style={[styles.title, { color: colors.navy }]}>BOOKING CONFIRMED</Text>
+          <Text style={[styles.title, { color: colors.navy }]}>Booking confirmed</Text>
           <Text style={[styles.bookingId, { color: colors.muted }]}>Reference: {id}</Text>
 
           <View style={[styles.divider, { backgroundColor: colors.border }]} />
@@ -67,7 +68,10 @@ export default function BookingConfirmedScreen() {
               <Text style={[styles.metaValue, { color: colors.text }]}>
                 {booking?.allocations
                   ? booking.allocations
-                      .map((a: any) => `${decryptRoomName(a.room_id, a.rooms?.name_enc)} (Bed ${a.bed_slot})`)
+                      .map(
+                        (a: any) =>
+                          `${decryptRoomName(a.room_id, a.rooms?.name_enc)} (Bed ${a.bed_slot})`,
+                      )
                       .join(', ')
                   : 'Pending'}
               </Text>
@@ -103,15 +107,15 @@ export default function BookingConfirmedScreen() {
 
 const styles = StyleSheet.create({
   container: {
-    padding: spacing.md,
+    width: '100%',
     alignItems: 'center',
-    justifyContent: 'center'
+    justifyContent: 'center',
   },
   card: {
     width: '100%',
     maxWidth: 520,
     alignItems: 'center',
-    padding: spacing.xl
+    padding: spacing.xl,
   },
   successIconCircle: {
     width: 64,
@@ -119,46 +123,41 @@ const styles = StyleSheet.create({
     borderRadius: 32,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: spacing.md
-  },
-  checkmark: {
-    color: '#FFFFFF',
-    fontSize: 32,
-    fontWeight: 'bold'
+    marginBottom: spacing.md,
   },
   title: {
     fontSize: typography.xl,
     fontWeight: typography.weights.bold,
-    textAlign: 'center'
+    textAlign: 'center',
   },
   bookingId: {
     fontSize: typography.xs,
     marginTop: 4,
-    textAlign: 'center'
+    textAlign: 'center',
   },
   divider: {
     width: '100%',
     height: 1,
-    marginVertical: spacing.lg
+    marginVertical: spacing.lg,
   },
   metaGrid: {
     width: '100%',
-    gap: spacing.sm
+    gap: spacing.sm,
   },
   metaRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center'
+    alignItems: 'center',
   },
   metaLabel: {
-    fontSize: typography.sm
+    fontSize: typography.sm,
   },
   metaValue: {
     fontSize: typography.sm,
-    fontWeight: typography.weights.medium
+    fontWeight: typography.weights.medium,
   },
   actions: {
     width: '100%',
-    gap: spacing.sm
-  }
+    gap: spacing.sm,
+  },
 });

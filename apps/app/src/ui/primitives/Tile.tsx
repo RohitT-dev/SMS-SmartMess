@@ -62,18 +62,24 @@ export const Tile: React.FC<TileProps> = ({
       style={({ pressed }) => [
         styles.tile,
         {
-          backgroundColor: pressed ? colors.bg : colors.surface,
+          backgroundColor: pressed
+            ? colors.surfaceAlt
+            : status === 'out_of_service'
+              ? colors.greySoft
+              : colors.surface,
           borderColor: colors.border
         }
       ]}
     >
-      {/* 4px left edge in status colour */}
+      {/* Left edge in status colour */}
       <View style={[styles.statusStrip, { backgroundColor: statusColor }]} />
 
       <View style={styles.content}>
         <View style={styles.header}>
           <Text style={[styles.roomName, { color: colors.text }]}>{roomName}</Text>
-          <Text style={[styles.roomType, { color: colors.muted }]}>{roomType}</Text>
+          <Text style={[styles.roomType, { color: colors.muted }]}>
+            {roomType === 'SEMI_VIP' ? 'Semi VIP' : roomType === 'NORMAL' ? 'Normal' : roomType}
+          </Text>
         </View>
 
         <View style={styles.footer}>
@@ -92,7 +98,7 @@ export const Tile: React.FC<TileProps> = ({
 
 const styles = StyleSheet.create({
   tile: {
-    borderRadius: layout.borderRadius,
+    borderRadius: layout.surfaceRadius,
     borderWidth: layout.borderWidth,
     flexDirection: 'row',
     overflow: 'hidden',
@@ -102,7 +108,7 @@ const styles = StyleSheet.create({
     minWidth: 160
   },
   statusStrip: {
-    width: 4
+    width: 5
   },
   content: {
     padding: spacing.md,
@@ -116,21 +122,20 @@ const styles = StyleSheet.create({
   },
   roomName: {
     fontSize: typography.base,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
+    flexShrink: 1
   },
   roomType: {
     fontSize: typography.xs,
     fontWeight: typography.weights.medium
   },
   footer: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: spacing.xs
+    marginTop: spacing.xs,
+    gap: 2
   },
   statusText: {
     fontSize: typography.sm,
-    fontWeight: typography.weights.medium
+    fontWeight: typography.weights.semibold
   },
   occupantText: {
     fontSize: typography.xs

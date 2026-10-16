@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView } from 'react-native';
+import React from 'react';
+import { View, Text, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useQuery } from '@tanstack/react-query';
 import { useThemeStore } from '../../src/state/themeStore';
@@ -10,11 +10,10 @@ import { Button } from '../../src/ui/primitives/Button';
 import { Select } from '../../src/ui/primitives/Select';
 import { Badge } from '../../src/ui/primitives/Badge';
 import { Table } from '../../src/ui/primitives/Table';
-import { Banner } from '../../src/ui/primitives/Banner';
-import { Dialog } from '../../src/ui/primitives/Dialog';
-import { Field } from '../../src/ui/primitives/Field';
 import { spacing, typography } from '../../src/ui/tokens';
 import { supabase } from '../../src/lib/supabase';
+import { logAction } from '../../src/lib/activityLog';
+import { fetchAccessStatus, signOut } from '../../src/features/auth/authFlow';
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -22,17 +21,13 @@ export default function SettingsScreen() {
   const themeMode = useThemeStore((s) => s.mode);
   const setThemeMode = useThemeStore((s) => s.setMode);
 
-  const {
-    autoLockMinutes,
-    setAutoLockMinutes,
-    lockSession,
-    userRole,
-    userPermissions
-  } = useSessionStore();
+  const { autoLockMinutes, setAutoLockMinutes, lockSession, userRole, userPermissions } =
+    useSessionStore();
 
-  const [showPassphraseDialog, setShowPassphraseDialog] = useState(false);
-  const [newPassphrase, setNewPassphrase] = useState('');
-  const [confirmPassphrase, setConfirmPassphrase] = useState('');
+  const { data: mfaRequired } = useQuery({
+    queryKey: ['mfa_required'],
+    queryFn: async () => (await fetchAccessStatus()).require_mfa
+  });
 
   // Fetch active devices
   const { data: devices, refetch: refetchDevices } = useQuery({
@@ -44,13 +39,14 @@ export default function SettingsScreen() {
         .order('last_seen_at', { ascending: false });
       if (error) throw error;
       return data || [];
-    }
+    },
   });
 
   const handleRevokeDevice = async (deviceId: string) => {
     try {
       const { error } = await supabase.rpc('revoke_device', { p_device_id: deviceId });
       if (error) throw error;
+      logAction('devices.revoke', { entity: 'devices', entityId: deviceId });
       refetchDevices();
     } catch (err: any) {
       alert('Failed to revoke device: ' + err.message);
@@ -58,19 +54,18 @@ export default function SettingsScreen() {
   };
 
   const handleSignOut = async () => {
-    lockSession();
-    await supabase.auth.signOut();
+    await signOut();
     router.replace('/(auth)/sign-in');
   };
 
   return (
     <Screen title="Account & Device Settings" showBack={false}>
-      <ScrollView contentContainerStyle={styles.container}>
+      <View style={styles.container}>
         {/* Profile Card */}
         <Card>
           <View style={styles.topRow}>
             <View>
-              <Text style={[styles.title, { color: colors.navy }]}>SECURITY PROFILE</Text>
+              <Text style={[styles.title, { color: colors.navy }]}>Security profile</Text>
               <Text style={[styles.subtitle, { color: colors.muted }]}>
                 Hardware security and cryptographic session parameters.
               </Text>
@@ -91,22 +86,28 @@ export default function SettingsScreen() {
           </Text>
 
           <View style={{ marginTop: spacing.md }}>
-            <Badge label="MANDATORY AAL2 TOTP ACTIVE" variant="success" />
+            <Badge
+              label={mfaRequired ? 'TOTP MFA REQUIRED' : 'PASSWORD SIGN-IN (MFA OFF)'}
+              variant={mfaRequired ? 'success' : 'warning'}
+            />
           </View>
         </Card>
 
         {/* Security & Preferences */}
         <Card style={{ marginTop: spacing.md }}>
-          <Text style={[styles.title, { color: colors.navy }]}>SECURITY & APP PREFERENCES</Text>
+          <Text style={[styles.title, { color: colors.navy }]}>Security and app preferences</Text>
 
           <View style={{ marginTop: spacing.sm }}>
             <Select
               label="Interface Theme"
               value={themeMode}
-              onChange={(val) => setThemeMode(val as any)}
+              onChange={(val) => {
+                setThemeMode(val as any);
+                logAction('settings.theme_change', { meta: { mode: val } });
+              }}
               options={[
                 { label: 'Light Mode (Service Theme)', value: 'light' },
-                { label: 'Dark Mode (Low Light)', value: 'dark' }
+                { label: 'Dark Mode (Low Light)', value: 'dark' },
               ]}
             />
           </View>
@@ -115,13 +116,16 @@ export default function SettingsScreen() {
             <Select
               label="Inactivity Auto-Lock Timeout"
               value={String(autoLockMinutes)}
-              onChange={(val) => setAutoLockMinutes(Number(val))}
+              onChange={(val) => {
+                setAutoLockMinutes(Number(val));
+                logAction('settings.autolock_change', { meta: { minutes: Number(val) } });
+              }}
               options={[
                 { label: '1 Minute (High Security)', value: '1' },
                 { label: '2 Minutes (Default Standard)', value: '2' },
                 { label: '5 Minutes', value: '5' },
                 { label: '10 Minutes', value: '10' },
-                { label: '15 Minutes (Maximum)', value: '15' }
+                { label: '15 Minutes (Maximum)', value: '15' },
               ]}
             />
           </View>
@@ -131,22 +135,19 @@ export default function SettingsScreen() {
               label="Lock Session Immediately"
               variant="secondary"
               onPress={() => {
+                logAction('session.lock', { meta: { trigger: 'settings' } });
                 lockSession();
                 router.replace('/(auth)/unlock');
               }}
             />
 
-            <Button
-              label="Sign Out & Lock Device"
-              variant="destructive"
-              onPress={handleSignOut}
-            />
+            <Button label="Sign Out & Lock Device" variant="destructive" onPress={handleSignOut} />
           </View>
         </Card>
 
         {/* Active Devices */}
         <Card style={{ marginTop: spacing.md }}>
-          <Text style={[styles.title, { color: colors.navy }]}>AUTHORIZED DEVICES</Text>
+          <Text style={[styles.title, { color: colors.navy }]}>Authorized devices</Text>
           <Text style={[styles.subtitle, { color: colors.muted }]}>
             Active sessions authenticated to this user account.
           </Text>
@@ -162,7 +163,7 @@ export default function SettingsScreen() {
                   <Text style={{ fontSize: typography.xs }}>
                     {d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : 'N/A'}
                   </Text>
-                )
+                ),
               },
               {
                 key: 'status',
@@ -173,7 +174,7 @@ export default function SettingsScreen() {
                     label={d.revoked_at ? 'REVOKED' : 'ACTIVE'}
                     variant={d.revoked_at ? 'error' : 'success'}
                   />
-                )
+                ),
               },
               {
                 key: 'action',
@@ -186,50 +187,50 @@ export default function SettingsScreen() {
                       variant="destructive"
                       onPress={() => handleRevokeDevice(d.id)}
                     />
-                  )
-              }
+                  ),
+              },
             ]}
             data={devices || []}
             keyExtractor={(d) => d.id}
             emptyText="No registered devices."
           />
         </Card>
-      </ScrollView>
+      </View>
     </Screen>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    padding: spacing.md
+    width: '100%',
   },
   topRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center'
+    alignItems: 'center',
   },
   title: {
     fontSize: typography.base,
-    fontWeight: typography.weights.bold
+    fontWeight: typography.weights.bold,
   },
   subtitle: {
     fontSize: typography.sm,
-    marginTop: 2
+    marginTop: 2,
   },
   divider: {
     height: 1,
-    marginVertical: spacing.md
+    marginVertical: spacing.md,
   },
   label: {
     fontSize: typography.xs,
-    textTransform: 'uppercase'
+    fontWeight: typography.weights.medium,
   },
   permList: {
     fontSize: typography.sm,
-    marginTop: 2
+    marginTop: 2,
   },
   actionButtons: {
     marginTop: spacing.lg,
-    gap: spacing.sm
-  }
+    gap: spacing.sm,
+  },
 });

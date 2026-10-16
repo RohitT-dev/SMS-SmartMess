@@ -14,22 +14,22 @@ export const Badge: React.FC<BadgeProps> = ({ label, variant = 'default' }) => {
   const getBadgeColors = () => {
     switch (variant) {
       case 'success':
-        return { bg: colors.green + '20', text: colors.green, border: colors.green };
+        return { bg: colors.greenSoft, text: colors.green };
       case 'warning':
-        return { bg: colors.orange + '20', text: colors.orange, border: colors.orange };
+        return { bg: colors.orangeSoft, text: colors.orange };
       case 'error':
-        return { bg: colors.red + '20', text: colors.red, border: colors.red };
+        return { bg: colors.redSoft, text: colors.red };
       case 'saffron':
-        return { bg: colors.saffron + '20', text: colors.saffron, border: colors.saffron };
+        return { bg: colors.saffronSoft, text: colors.saffronInk };
       default:
-        return { bg: colors.surface, text: colors.text, border: colors.border };
+        return { bg: colors.greySoft, text: colors.text };
     }
   };
 
   const c = getBadgeColors();
 
   return (
-    <View style={[styles.badge, { backgroundColor: c.bg, borderColor: c.border }]}>
+    <View style={[styles.badge, { backgroundColor: c.bg }]}>
       <Text style={[styles.text, { color: c.text }]}>{label}</Text>
     </View>
   );
@@ -38,14 +38,13 @@ export const Badge: React.FC<BadgeProps> = ({ label, variant = 'default' }) => {
 const styles = StyleSheet.create({
   badge: {
     paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
+    paddingVertical: 3,
     borderRadius: layout.borderRadius,
-    borderWidth: layout.borderWidth,
     alignSelf: 'flex-start',
-    marginRight: spacing.xs
+    marginRight: spacing.xs,
   },
   text: {
     fontSize: typography.xs,
-    fontWeight: typography.weights.medium
-  }
+    fontWeight: typography.weights.semibold,
+  },
 });

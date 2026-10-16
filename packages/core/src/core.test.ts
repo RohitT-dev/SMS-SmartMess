@@ -10,16 +10,11 @@ import {
   compareRanks,
   getErrorMessage,
   GuestPiiSchema,
-  CreateBookingRequestSchema,
   DenyRequestSchema,
-  ApproveEvictionSchema
+  ApproveEvictionSchema,
 } from './index.ts';
 
-import type {
-  BookingPlanRequest,
-  ReportDailyRow,
-  RoomDayState
-} from './index.ts';
+import type { BookingPlanRequest, ReportDailyRow, RoomDayState } from './index.ts';
 
 describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
   it('Rank metadata, comparison, and seniority', () => {
@@ -44,7 +39,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
       date: '2026-10-20',
       bedsTaken: 0,
       isClosed: false,
-      occupants: []
+      occupants: [],
     };
 
     assert.strictEqual(roomStatus(baseState), 'free');
@@ -85,7 +80,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
         date: '2026-10-20',
         bedsTaken: 0,
         isClosed: false,
-        occupants: []
+        occupants: [],
       },
       {
         roomId: 'room-1',
@@ -94,8 +89,8 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
         date: '2026-10-21',
         bedsTaken: 0,
         isClosed: false,
-        occupants: []
-      }
+        occupants: [],
+      },
     ];
 
     const req: BookingPlanRequest = {
@@ -104,8 +99,8 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
       checkOut: '2026-10-22',
       guests: [
         { gender: 'M', rankCode: 'SQN_LDR' },
-        { gender: 'M', rankCode: 'SQN_LDR' }
-      ]
+        { gender: 'M', rankCode: 'SQN_LDR' },
+      ],
     };
 
     const res = planAllotment(req, states);
@@ -128,7 +123,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
         date: '2026-10-20',
         bedsTaken: 0,
         isClosed: false,
-        occupants: []
+        occupants: [],
       },
       {
         roomId: 'room-2',
@@ -137,8 +132,8 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
         date: '2026-10-20',
         bedsTaken: 0,
         isClosed: false,
-        occupants: []
-      }
+        occupants: [],
+      },
     ];
 
     const req: BookingPlanRequest = {
@@ -148,8 +143,8 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
       guests: [
         { gender: 'M', rankCode: 'SQN_LDR' },
         { gender: 'M', rankCode: 'SQN_LDR' },
-        { gender: 'F', rankCode: 'FLT_LT' } // Different gender & rank
-      ]
+        { gender: 'F', rankCode: 'FLT_LT' }, // Different gender & rank
+      ],
     };
 
     const res = planAllotment(req, states);
@@ -170,15 +165,15 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
         date: '2026-10-20',
         bedsTaken: 0,
         isClosed: false,
-        occupants: []
-      }
+        occupants: [],
+      },
     ];
 
     const req: BookingPlanRequest = {
       category: 'MSA',
       checkIn: '2026-10-20',
       checkOut: '2026-10-21',
-      guests: [{ gender: 'M', rankCode: 'AIR_CDRE' }]
+      guests: [{ gender: 'M', rankCode: 'AIR_CDRE' }],
     };
 
     const res = planAllotment(req, states);
@@ -195,7 +190,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
         date: '2026-10-20',
         bedsTaken: 2, // Full
         isClosed: false,
-        occupants: []
+        occupants: [],
       },
       {
         roomId: 'normal-1',
@@ -204,8 +199,8 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
         date: '2026-10-20',
         bedsTaken: 0, // Free
         isClosed: false,
-        occupants: []
-      }
+        occupants: [],
+      },
     ];
 
     const req: BookingPlanRequest = {
@@ -213,7 +208,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
       checkIn: '2026-10-20',
       checkOut: '2026-10-21',
       preferredRoomType: 'VIP',
-      guests: [{ gender: 'M', rankCode: 'SQN_LDR' }]
+      guests: [{ gender: 'M', rankCode: 'SQN_LDR' }],
     };
 
     const res = planAllotment(req, states);
@@ -239,7 +234,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
         { day: dayStr, category: 'MSA', roomType: 'NORMAL', people: M[day - 1] },
         { day: dayStr, category: 'PI', roomType: 'NORMAL', people: P[day - 1] },
         { day: dayStr, category: 'LEAVE', roomType: 'NORMAL', people: L[day - 1] },
-        { day: dayStr, category: 'TD', roomType: 'NORMAL', people: T[day - 1] }
+        { day: dayStr, category: 'TD', roomType: 'NORMAL', people: T[day - 1] },
       );
     }
 
@@ -271,7 +266,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
     const valid = {
       name: 'Major General V. Rao',
       idNumber: 'ID-99212',
-      phone: '+91 9876543210'
+      phone: '+91 9876543210',
     };
     const parsed = GuestPiiSchema.parse(valid);
     assert.strictEqual(parsed.name, 'Major General V. Rao');
@@ -288,7 +283,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
         checkIn: '2026-10-01',
         checkOut: '2026-10-02',
         partySize: 1,
-        reason: 'No space'
+        reason: 'No space',
       });
     }, /Only LEAVE and TD/i);
 
@@ -297,7 +292,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
       checkIn: '2026-10-01',
       checkOut: '2026-10-02',
       partySize: 1,
-      reason: 'No free rooms on requested dates'
+      reason: 'No free rooms on requested dates',
     });
     assert.strictEqual(validDenial.category, 'LEAVE');
   });
@@ -310,10 +305,10 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
           checkIn: '2026-10-01',
           checkOut: '2026-10-03',
           partySize: 1,
-          guests: [{ gender: 'M', rankCode: 'WG_CDR' }]
+          guests: [{ gender: 'M', rankCode: 'WG_CDR' }],
         },
         evictAllocationIds: ['alloc-1'],
-        reason: 'Too short' // 9 characters
+        reason: 'Too short', // 9 characters
       });
     }, /10 characters/i);
   });

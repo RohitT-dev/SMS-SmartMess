@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { View, StyleSheet, Animated, ViewStyle, StyleProp } from 'react-native';
+import { StyleSheet, Animated, ViewStyle, StyleProp } from 'react-native';
 import { useThemeStore } from '../../state/themeStore';
 import { layout } from '../tokens';
 
@@ -14,7 +14,7 @@ export const Skeleton: React.FC<SkeletonProps> = ({
   width = '100%',
   height = 20,
   borderRadius = layout.borderRadius,
-  style
+  style,
 }) => {
   const colors = useThemeStore((s) => s.colors);
   const opacity = useRef(new Animated.Value(0.4)).current;
@@ -25,14 +25,14 @@ export const Skeleton: React.FC<SkeletonProps> = ({
         Animated.timing(opacity, {
           toValue: 0.8,
           duration: 750,
-          useNativeDriver: true
+          useNativeDriver: true,
         }),
         Animated.timing(opacity, {
           toValue: 0.4,
           duration: 750,
-          useNativeDriver: true
-        })
-      ])
+          useNativeDriver: true,
+        }),
+      ]),
     );
     pulse.start();
     return () => pulse.stop();
@@ -47,9 +47,9 @@ export const Skeleton: React.FC<SkeletonProps> = ({
           height,
           borderRadius,
           backgroundColor: colors.border,
-          opacity
+          opacity,
         },
-        style
+        style,
       ]}
     />
   );
@@ -57,6 +57,6 @@ export const Skeleton: React.FC<SkeletonProps> = ({
 
 const styles = StyleSheet.create({
   skeleton: {
-    overflow: 'hidden'
-  }
+    overflow: 'hidden',
+  },
 });

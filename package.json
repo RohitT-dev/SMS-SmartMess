@@ -7,6 +7,7 @@
     "test": "vitest run",
     "lint": "eslint .",
     "seed:dev": "tsx scripts/seed-dev.ts",
+    "db:migrate": "scripts/supabase-migrate.sh",
     "web": "pnpm --filter app run web",
     "ios": "pnpm --filter app run ios",
     "android": "pnpm --filter app run android",

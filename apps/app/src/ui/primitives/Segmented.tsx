@@ -72,7 +72,7 @@ export function Segmented<T extends string = string>({
                   style={[
                     styles.badgeText,
                     {
-                      color: isSelected ? '#FFFFFF' : colors.text
+                      color: isSelected ? colors.onNavy : colors.text
                     }
                   ]}
                 >
