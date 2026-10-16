@@ -37,10 +37,6 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   icon: './assets/icon.png',
   userInterfaceStyle: 'automatic',
   scheme: 'smartmess',
-  splash: {
-    resizeMode: 'contain',
-    backgroundColor: '#12283F',
-  },
   assetBundlePatterns: ['**/*'],
   ios: {
     supportsTablet: true,
@@ -57,7 +53,13 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     output: 'single',
     favicon: './assets/favicon.png',
   },
-  plugins: ['expo-router', 'expo-local-authentication'],
+  plugins: [
+    'expo-router',
+    'expo-local-authentication',
+    'expo-secure-store',
+    // The top-level `splash` field is no longer in the config schema; configure it here.
+    ['expo-splash-screen', { backgroundColor: '#12283F' }],
+  ],
   experiments: {
     typedRoutes: true,
   },
