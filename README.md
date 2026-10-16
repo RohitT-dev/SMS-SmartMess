@@ -59,6 +59,14 @@ A security review of migrations 0014–0018 found five gaps; `0019_security_revi
 
 ## 3. Setup Guide
 
+**From zero to a phone, in order:**
+1. **Install** the tools and the project on a computer ([one-command install](#option-1-one-command-install-recommended)).
+2. **Set up the database:** a new Supabase project ([Section 4](#4-supabase-setup)), or connect to your team's existing one ([joining](#joining-an-existing-project-teammates)).
+3. **Create the first Administrator** and set the access code ([First Administrator](#first-administrator)).
+4. **Run it** on the computer: `pnpm web` ([Run the app](#run-the-app)).
+5. **Put it on phones:** web app, Android APK or iPhone build ([Install on a phone](#install-on-a-phone)).
+6. **Invite staff** from User Directory and give them the access code.
+
 ### What you need
 | Tool | Version | Why |
 |---|---|---|
@@ -146,10 +154,84 @@ To see anything, each person needs their own account **and** the access code.
 pnpm web        # browser at http://localhost:8081
 pnpm ios        # iOS Simulator (macOS + Xcode)
 pnpm android    # Android emulator (Android Studio)
-pnpm start      # Expo dev server; scan the QR code with Expo Go
+pnpm start      # Expo dev server; scan the QR code with Expo Go (see Install on a phone)
 ```
 
+### Install on a phone
+Pick the path that fits who is installing. All of them connect to the Supabase project in `.env` (or in EAS environment variables for store builds), so the phone needs internet access to that project.
+
+| Path | Android | iPhone | Needs | Best for |
+|---|---|---|---|---|
+| **A. Web app on the home screen** | Yes | Yes | A web host | Fastest rollout to staff, no app store |
+| **B. Android APK** | Yes | No | Free Expo account | Installing the real app on Android phones |
+| **C. iPhone build** | No | Yes | Apple Developer account (paid) | Installing the real app on iPhones |
+| **D. Expo Go (testing only)** | Yes | Limited | Phone on the same Wi-Fi | Developers trying a change |
+
+#### A. Web app on the home screen (Android and iPhone)
+1. Build the web app:
+   ```bash
+   pnpm --filter app run export:web
+   ```
+2. Upload `apps/app/dist/` to any static host that serves HTTPS (Netlify, Vercel, Cloudflare Pages, or your own server). Route every path to `index.html`. Add the headers in [docs/security-headers.md](docs/security-headers.md).
+3. On the phone, open the site, then:
+   - **Android (Chrome):** menu ⋮ → **Add to Home screen** → **Install**.
+   - **iPhone (Safari):** Share button → **Add to Home Screen** → **Add**.
+4. Open it from the new icon and sign in.
+
+To update, rebuild and upload again; phones get the new version on next open.
+
+#### B. Android APK (install the real app)
+One-time setup on your computer:
+```bash
+npm install -g eas-cli
+eas login                       # free account at expo.dev
+cd apps/app
+eas init                        # creates the Expo project
+```
+`eas init` prints a project ID. Because `app.config.ts` is a dynamic config, it can't write it for you: add `EAS_PROJECT_ID=<that id>` to your `.env`.
+
+`.env` is git-ignored, so the cloud build can't see it. Store the two public values in EAS once:
+```bash
+eas env:create --environment preview --visibility plaintext --name EXPO_PUBLIC_SUPABASE_URL --value https://<project-ref>.supabase.co
+eas env:create --environment preview --visibility plaintext --name EXPO_PUBLIC_SUPABASE_KEY --value <anon-or-publishable-key>
+```
+Never add `SUPABASE_SERVICE_ROLE_KEY` to EAS.
+
+Build the APK (runs in Expo's cloud, about 10–20 minutes):
+```bash
+eas build --platform android --profile preview
+```
+When it finishes, EAS prints a download link and a QR code. On each Android phone:
+1. Open the link (or scan the QR code) and download the `.apk`.
+2. Tap the file. If Android blocks it, allow **Install unknown apps** for your browser or file manager when prompted.
+3. Tap **Install**, then open **Smart Mess System** and sign in.
+
+To update, run the same build again and install the new APK over the old one; data stays in Supabase.
+
+Without EAS, a computer with Android Studio can build locally:
+```bash
+cd apps/app
+npx expo run:android --variant release
+```
+The APK lands in `apps/app/android/app/build/outputs/apk/release/`. It's signed with a debug key, so use it for testing only.
+
+#### C. iPhone build
+Apple does not allow installing app files directly, so iPhones need an **Apple Developer Program** membership.
+- **TestFlight (recommended):** run `eas build --platform ios --profile production`, then `eas submit --platform ios`. Add staff as testers in App Store Connect → TestFlight. They install the **TestFlight** app and accept the invite.
+- **Ad hoc (up to 100 registered devices):** run `eas device:create` and open the link on each iPhone to register it. Then run `eas build --platform ios --profile preview` and open the build link on the phone. On iOS 16 or later, turn on **Settings → Privacy & Security → Developer Mode** once.
+
+Set the same EAS environment variables as in B, using `--environment production` for TestFlight builds. Without a developer account, use **path A** on iPhones.
+
+#### D. Expo Go (developers testing a change)
+1. Run `pnpm start` on your computer, with the phone on the same Wi-Fi. Add `--tunnel` if the networks differ: `pnpm --filter app exec expo start --tunnel`.
+2. Scan the QR code: with the Camera app on iPhone, or inside Expo Go on Android.
+
+Notes:
+- **SDK versions:** this app uses **Expo SDK 52**. The App Store version of Expo Go only runs the newest SDK, so on iPhone use path A or C. On Android, install the Expo Go build for SDK 52 from [expo.dev/go](https://expo.dev/go).
+- **Local database:** if `.env` points at a local Supabase (`http://127.0.0.1:54321`), the phone can't reach it. Use your computer's Wi-Fi IP instead (for example `http://192.168.1.20:54321`), or a cloud project.
+
 ### Troubleshooting
+- **App on the phone can't sign in** ("Network request failed"): the phone can't reach the Supabase URL. For an APK, check the EAS environment variables and rebuild. With Expo Go, don't use `127.0.0.1`.
 - **"Missing Supabase URL"** or a blank sign-in: check `.env`, then restart the dev server with `pnpm --filter app exec expo start --web --clear`.
 - **`Docker is not running`**: start Docker Desktop and wait until it says it is running.
 - **Port 54321/54322 in use**: another Supabase stack is running. Stop it with `supabase stop --all`.

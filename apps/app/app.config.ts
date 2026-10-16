@@ -62,6 +62,8 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     typedRoutes: true,
   },
   extra: {
+    // Set by `eas init` (or EAS_PROJECT_ID) so phone builds know which Expo project they belong to.
+    ...(env('EAS_PROJECT_ID') ? { eas: { projectId: env('EAS_PROJECT_ID') } } : {}),
     supabaseUrl: env('EXPO_PUBLIC_SUPABASE_URL'),
     supabaseAnonKey: env('EXPO_PUBLIC_SUPABASE_ANON_KEY') || env('EXPO_PUBLIC_SUPABASE_KEY'),
   },
