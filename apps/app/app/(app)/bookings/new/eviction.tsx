@@ -41,6 +41,8 @@ interface ParsedPayload {
   category: Category;
   checkIn: string;
   checkOut: string;
+  /** "Allow room sharing" of the incoming request; off, it cannot be seated beside anyone who stays. */
+  allowSharing?: boolean;
   guests: GuestDemand[];
 }
 
@@ -59,12 +61,13 @@ export default function EvictionReviewScreen() {
   } catch {
     parsed = null;
   }
-  const { bookingId, category, checkIn, checkOut, guests } = parsed || {
+  const { bookingId, category, checkIn, checkOut, guests, allowSharing } = parsed || {
     bookingId: undefined,
     category: 'MFA' as Category,
     checkIn: '',
     checkOut: '',
     guests: [],
+    allowSharing: undefined,
   };
 
   const [selectedAllocationIds, setSelectedAllocationIds] = useState<string[]>([]);
@@ -129,6 +132,7 @@ export default function EvictionReviewScreen() {
             rankCode: occ.rankCode,
             relation: occ.relation,
             bookingId: occ.bookingId,
+            allowSharing: occ.allowSharing,
           });
         }
       }
@@ -137,7 +141,7 @@ export default function EvictionReviewScreen() {
   }, [states]);
 
   // Selected beds in selection order, and who sits where. Pairs that belong together (couples,
-  // same gender and rank, a ranked guest and a civilian of the party) go into one room.
+  // same gender, a ranked guest and a civilian of the party) go into one room.
   const selectedBeds: FreedBed[] = useMemo(
     () =>
       selectedAllocationIds
@@ -173,21 +177,22 @@ export default function EvictionReviewScreen() {
         gender: x.gender,
         rankCode: x.rankCode,
         bookingId: bookingId ?? INCOMING,
+        allowSharing: allowSharing === true,
       }));
       const clashesWithStayer = stayers.some((st) => incoming.some((p) => !canShareRoom(p, st)));
       const clashesWithinParty = incoming.some((p, i) => incoming.slice(i + 1).some((q) => !canShareRoom(p, q)));
       if (clashesWithStayer) {
         problems.push(
-          `${roomLabel}: the guest remaining there cannot share with the incoming guest (different gender or rank, or a civilian from another booking). Also select that occupant's bed, or choose another room.`,
+          `${roomLabel}: the guest remaining there cannot share with the incoming guest (different gender, a civilian from another booking, or a booking that does not allow room sharing). Also select that occupant's bed, or choose another room.`,
         );
       } else if (clashesWithinParty) {
         problems.push(
-          `${roomLabel}: incoming guests ${seated.map((x) => x.idx + 1).join(' and ')} differ in gender or rank and cannot share this room.`,
+          `${roomLabel}: incoming guests ${seated.map((x) => x.idx + 1).join(' and ')} differ in gender and cannot share this room.`,
         );
       }
     }
     return problems;
-  }, [selectedBeds, seating, candidates, guests, remainingByRoom, selectedAllocationIds, bookingId]);
+  }, [selectedBeds, seating, candidates, guests, remainingByRoom, selectedAllocationIds, bookingId, allowSharing]);
 
   const toggleSelectAllocation = (id: string) => {
     if (selectedAllocationIds.includes(id)) {
@@ -217,6 +222,8 @@ export default function EvictionReviewScreen() {
           check_in: checkIn,
           check_out: checkOut,
           party_size: guests.length,
+          // Only used when the incoming party is booked here; a saved request keeps its own flag.
+          allow_sharing: allowSharing === true,
           guests: bookingId ? [] : guestRowsPayload(guests),
           allocations: (seating ?? []).map((s) => ({
             guest_seq: s.guestIndex + 1,
@@ -271,7 +278,7 @@ export default function EvictionReviewScreen() {
             DISPLACEMENT CANDIDATES ({candidates.length} bed{candidates.length === 1 ? '' : 's'})
           </Text>
           <Text style={[styles.subtitle, { color: colors.muted }]}>
-            Tap beds to displace. Guests who belong together (couples, same gender and rank) are seated in one room when both its beds are selected.
+            Tap beds to displace. Guests who belong together (couples, guests of the same gender) are seated in one room when both its beds are selected.
             MFA can displace PI/LEAVE/TD; PI can displace LEAVE/TD. Suites are excluded.
           </Text>
 

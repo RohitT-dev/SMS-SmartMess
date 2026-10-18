@@ -51,7 +51,7 @@ export interface SeatedGuest {
 
 /**
  * Seats an incoming party on the beds an eviction frees. People who belong in one room (a primary
- * and spouse, two ranked guests of the same gender and rank, a ranked guest and a civilian of the
+ * and spouse, two ranked guests of the same gender (any rank), a ranked guest and a civilian of the
  * party) are put into a room whose two beds are both freed; only when no such room is left are
  * they split. Returns null when there are fewer beds than guests.
  */

@@ -4,6 +4,7 @@ import {
   computeIdBlindIndex,
   getActiveKeyVersion,
 } from '../crypto-session/cryptoSession';
+import { PLACEHOLDER_GUEST_NAME, savePlainGuestDetails } from './plainGuestDetails';
 
 export interface GuestInputDetails {
   name?: string | null;
@@ -15,19 +16,32 @@ export interface GuestInputDetails {
   notes?: string | null;
 }
 
+export interface GuestDetailsSaveResult {
+  /** Name, unit, service number and phone are stored as readable columns (what every screen shows). */
+  plainSaved: boolean;
+  /** The encrypted record (ID number, remarks and a copy of the above) was stored. */
+  encryptedSaved: boolean;
+  /** Raw messages of whatever failed; screens pass them through userErrorMessage. */
+  errors: string[];
+}
+
 /**
- * Persists guest details and encrypted PII across all redundant channels:
- * 1. set_booking_guest_details RPC (if available in schema)
- * 2. booking_guests table direct update (if permitted by RLS)
- * 3. set_guest_pii RPC with client-side AES-256-GCM encryption & blind indexing
+ * Persists guest details through the two channels the database offers:
+ * 1. set_booking_guest_details RPC: name, unit, service number, phone as readable columns.
+ *    (booking_guests has no direct UPDATE grant, so this RPC is the only way to write them.)
+ * 2. set_guest_pii RPC: the encrypted record, with client-side AES-256-GCM encryption and an
+ *    ID-number blind index. ID numbers and remarks exist only here, never as plain columns.
+ *
+ * Never throws; check the result. Failures are also reported to the console without any values.
  */
 export async function persistGuestDetails(
   guestId: string,
   details: GuestInputDetails,
-): Promise<void> {
-  if (!guestId) return;
+): Promise<GuestDetailsSaveResult> {
+  const result: GuestDetailsSaveResult = { plainSaved: false, encryptedSaved: false, errors: [] };
+  if (!guestId) return result;
 
-  const resolvedName = details.name?.trim() || 'Officer / Guest';
+  const resolvedName = details.name?.trim() || PLACEHOLDER_GUEST_NAME;
   const resolvedServiceNo = details.serviceNumber?.trim() || null;
   const resolvedUnit = details.unit?.trim() || null;
   const resolvedPhone = details.phone?.trim() || null;
@@ -35,36 +49,20 @@ export async function persistGuestDetails(
   const resolvedIdType = details.idType?.trim() || null;
   const resolvedNotes = details.notes?.trim() || null;
 
-  // Channel A: set_booking_guest_details RPC
-  try {
-    await supabase.rpc('set_booking_guest_details', {
-      p_guest_id: guestId,
-      p_guest_name: resolvedName,
-      p_unit: resolvedUnit,
-      p_service_number: resolvedServiceNo,
-      p_phone: resolvedPhone,
-    });
-  } catch {
-    // Ignore if RPC not yet deployed
+  // Channel 1: readable columns.
+  const plain = await savePlainGuestDetails(supabase, guestId, {
+    name: details.name?.trim() || null,
+    unit: resolvedUnit,
+    serviceNumber: resolvedServiceNo,
+    phone: resolvedPhone,
+  });
+  result.plainSaved = plain.ok;
+  if (!plain.ok) {
+    result.errors.push(plain.message ?? 'Could not save guest details');
+    console.warn('set_booking_guest_details failed:', plain.message);
   }
 
-  // Channel B: direct update on booking_guests
-  try {
-    await supabase
-      .from('booking_guests')
-      .update({
-        guest_name: resolvedName,
-        unit: resolvedUnit,
-        service_number: resolvedServiceNo,
-        phone: resolvedPhone,
-        details: 'COMPLETE',
-      })
-      .eq('id', guestId);
-  } catch {
-    // Ignore if direct update restricted by RLS
-  }
-
-  // Channel C: Encrypted guest_pii via set_guest_pii RPC
+  // Channel 2: encrypted record.
   try {
     const cipherEnc = encryptGuestPii(guestId, {
       name: resolvedName,
@@ -86,9 +84,15 @@ export async function persistGuestDetails(
       p_key_version: getActiveKeyVersion(),
     });
     if (piiRpcErr) {
-      console.warn('set_guest_pii warning:', piiRpcErr);
+      result.errors.push(piiRpcErr.message || 'Could not save encrypted guest record');
+      console.warn('set_guest_pii failed:', piiRpcErr.message);
+    } else {
+      result.encryptedSaved = true;
     }
   } catch (piiErr) {
-    console.warn('Could not encrypt guest PII:', piiErr);
+    result.errors.push(piiErr instanceof Error ? piiErr.message : 'Could not encrypt guest record');
+    console.warn('Could not encrypt guest PII');
   }
+
+  return result;
 }

@@ -16,6 +16,14 @@ import { Banner } from '../../../src/ui/primitives/Banner';
 import { spacing, typography } from '../../../src/ui/tokens';
 import { supabase } from '../../../src/lib/supabase';
 import { describeGuest } from '../../../src/features/bookings/party';
+import {
+  guestName,
+  guestPhone,
+  guestRankOrRelation,
+  guestServiceNumber,
+  guestUnit,
+  type GuestLike,
+} from '../../../src/features/bookings/guestDisplay';
 import { logAction } from '../../../src/lib/activityLog';
 import { userErrorMessage } from '../../../src/lib/userError';
 import {
@@ -27,8 +35,16 @@ interface Occupant {
   id: string;
   guest_id: string;
   bed_slot: 1 | 2;
-  bookings?: { id: string; category: string; check_in: string; check_out: string; status: string };
-  booking_guests?: { rank_code: string | null; gender: string; relation?: string };
+  bookings?: {
+    id: string;
+    category: string;
+    check_in: string;
+    check_out: string;
+    status: string;
+    /** "Allow room sharing"; rows from before the option are true. */
+    allow_sharing?: boolean;
+  };
+  booking_guests?: GuestLike & { gender: string };
 }
 
 interface RoomDetail {
@@ -102,6 +118,9 @@ export default function RoomDetailScreen() {
     const m = /^[[(]\s*([0-9-]+)\s*,\s*([0-9-]+)\s*[)\]]$/.exec(c.period);
     return !!m && m[1] <= today && today < m[2];
   });
+  // A lone guest of a booking that does not allow room sharing holds the whole room: the empty
+  // bed is not free, so it is not listed (a party of two in one such booking shows both beds).
+  const heldByExclusiveBooking = current.length === 1 && current[0].bookings?.allow_sharing === false;
 
   const handleNewBooking = (bedSlot?: 1 | 2) => {
     if (!room) return;
@@ -122,8 +141,13 @@ export default function RoomDetailScreen() {
     });
     if (error) throw error;
     if (!cipher) return 'Details Pending';
+    // Name, unit, service number and phone are plain text on the bed card; the ID number and remarks are encrypted.
     const pii = decryptGuestPii(guestId, cipher);
-    return `${pii.name} (Service: ${pii.serviceNumber || 'N/A'}, Phone: ${pii.phone || 'N/A'})`;
+    const parts = [
+      `${pii.idType?.trim() || 'ID'}: ${pii.idNumber?.trim() || 'N/A'}`,
+      pii.notes?.trim() ? `Notes: ${pii.notes.trim()}` : null,
+    ];
+    return parts.filter(Boolean).join(' · ');
   };
 
   const canDeleteRoom = canManageRooms && (room?.room_type !== 'SUITE' || userRole === 'admin');
@@ -203,16 +227,34 @@ export default function RoomDetailScreen() {
               Category: <Text style={{ fontWeight: 'bold' }}>{alloc.bookings?.category}</Text> •
               Guest:{' '}
               <Text style={{ fontWeight: 'bold' }}>
-                {alloc.booking_guests ? describeGuest(alloc.booking_guests) : '—'}
+                {alloc.booking_guests ? guestName(alloc.booking_guests) : '—'}
               </Text>
             </Text>
+            {alloc.booking_guests ? (
+              <Text style={[styles.infoRow, { color: colors.text }]}>
+                {[
+                  describeGuest(alloc.booking_guests),
+                  guestUnit(alloc.booking_guests) && `Unit: ${guestUnit(alloc.booking_guests)}`,
+                  guestServiceNumber(alloc.booking_guests) && `Service No: ${guestServiceNumber(alloc.booking_guests)}`,
+                  guestPhone(alloc.booking_guests) && `Phone: ${guestPhone(alloc.booking_guests)}`,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+              </Text>
+            ) : null}
             <Text style={[styles.infoRow, { color: colors.muted }]}>
               Stay: {alloc.bookings?.check_in} (12 PM) to {alloc.bookings?.check_out} (12 PM)
+            </Text>
+            <Text style={[styles.infoRow, { color: colors.muted }]}>
+              Room sharing:{' '}
+              <Text style={{ fontWeight: 'bold' }}>
+                {alloc.bookings?.allow_sharing === false ? 'Not allowed (whole room held)' : 'Allowed'}
+              </Text>
             </Text>
 
             <MaskedValue
               id={alloc.guest_id}
-              label="Guest Identity"
+              label="ID Number & Notes"
               canReveal={canReveal}
               maskedText={canReveal ? undefined : '•••••••• (reveal permission required)'}
               fetchPlaintext={() => fetchPii(alloc.guest_id)}
@@ -227,7 +269,13 @@ export default function RoomDetailScreen() {
         ) : departing ? (
           <View style={styles.occupantInfo}>
             <Text style={[styles.infoRow, { color: colors.text }]}>
-              Departing Guest: <Text style={{ fontWeight: 'bold' }}>{departing.booking_guests?.rank_code}</Text> •
+              Departing Guest:{' '}
+              <Text style={{ fontWeight: 'bold' }}>
+                {departing.booking_guests
+                  ? `${guestName(departing.booking_guests)} (${guestRankOrRelation(departing.booking_guests)})`
+                  : '—'}
+              </Text>{' '}
+              •
               Gender: <Text style={{ fontWeight: 'bold' }}>{departing.booking_guests?.gender}</Text>
             </Text>
             <Text style={[styles.infoRow, { color: colors.blue }]}>
@@ -245,7 +293,7 @@ export default function RoomDetailScreen() {
             <Text style={[styles.freeNotice, { color: closedToday ? colors.muted : colors.green }]}>
               {closedToday
                 ? 'Out of service today'
-                : 'Available. 12:00 PM Check-In / 12:00 PM Check-Out standard mess rule applies. A ranked guest must match the other occupant’s gender and rank; civilians share only with their own booking.'}
+                : 'Available. 12:00 PM Check-In / 12:00 PM Check-Out standard mess rule applies. A ranked guest may share with a guest of the same gender (any rank); civilians share only with their own booking. Both bookings must allow room sharing.'}
             </Text>
             {!closedToday && (
               <Button
@@ -282,8 +330,16 @@ export default function RoomDetailScreen() {
         BED INVENTORY & OCCUPANTS ({today})
       </Text>
 
-      {renderBed(1)}
-      {renderBed(2)}
+      {([1, 2] as const).map((slot) => {
+        const empty = !current.some((a) => a.bed_slot === slot) && !departingToday.some((a) => a.bed_slot === slot);
+        // The empty bed of a room held by a non-sharing booking is not free, so it is not drawn.
+        return heldByExclusiveBooking && empty ? null : renderBed(slot);
+      })}
+      {heldByExclusiveBooking && (
+        <Text style={[styles.freeNotice, { color: colors.muted }]}>
+          This room is held by a booking that does not allow room sharing, so its second bed is not offered.
+        </Text>
+      )}
 
       <Text style={[styles.sectionHeading, { color: colors.navy }]}>Upcoming stays</Text>
       <Card style={styles.bedCard}>
@@ -293,7 +349,8 @@ export default function RoomDetailScreen() {
           upcoming.map((a) => (
             <Text key={a.id} style={[styles.infoRow, { color: colors.text }]}>
               {a.bookings?.check_in} (12 PM) → {a.bookings?.check_out} (12 PM) • Bed {a.bed_slot} •{' '}
-              {a.bookings?.category} • {a.booking_guests ? describeGuest(a.booking_guests) : '—'}
+              {a.bookings?.category} •{' '}
+              {a.booking_guests ? `${guestName(a.booking_guests)} · ${describeGuest(a.booking_guests)}` : '—'}
             </Text>
           ))
         )}

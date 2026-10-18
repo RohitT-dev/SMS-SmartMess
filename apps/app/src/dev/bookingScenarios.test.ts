@@ -37,7 +37,13 @@ interface BookArgs {
   checkOut: string;
   guests: GuestDemand[];
   pref?: RoomType;
+  /** preferSharing: seat a lone guest beside a compatible guest before opening an empty room. */
   sharing?: boolean;
+  /**
+   * "Allow room sharing" on the booking. Defaults to true here so the older scenarios keep
+   * exercising shared rooms; the room-sharing scenarios pass it explicitly (the app's default is off).
+   */
+  allow?: boolean;
 }
 
 let sb: Sb;
@@ -69,6 +75,7 @@ async function plan(a: BookArgs): Promise<AllotmentResult> {
     guests: a.guests,
     preferredRoomType: a.pref,
     preferSharing: a.sharing,
+    allowSharing: a.allow ?? true,
   };
   const load = async (to: string) => {
     const { data, error } = await sb.rpc('daily_room_state', { p_from: a.checkIn, p_to: to });
@@ -89,6 +96,7 @@ function bookingPayload(a: BookArgs, allocs: Array<{ guestIndex: number; roomId:
       check_out: a.checkOut,
       party_size: a.guests.length,
       is_suite_booking: false,
+      allow_sharing: a.allow ?? true,
     },
     p_guests: guestRowsPayload(a.guests),
     p_allocations: allocs.map((x) => ({ guest_seq: x.guestIndex + 1, room_id: x.roomId, bed_slot: x.bedSlot })),
@@ -163,9 +171,10 @@ describe('placement permutations', () => {
     expect(new Set(r.placements.map((p) => p.room)).size).toBe(2);
   });
 
-  it('same gender but different rank → separate rooms', async () => {
+  it('same gender but different rank → one room (rank no longer has to match)', async () => {
     const r = await book({ checkIn: d(0), checkOut: d(1), guests: [G('M', 'FO'), G('M', 'FLT_LT')], pref: 'NORMAL' });
-    expect(new Set(r.placements.map((p) => p.room)).size).toBe(2);
+    expect(new Set(r.placements.map((p) => p.room)).size).toBe(1);
+    expect(r.placements.map((p) => p.bed).sort()).toEqual([1, 2]);
   });
 
   it('party of 5 with a mix pairs what it can (3 rooms)', async () => {
@@ -209,16 +218,13 @@ describe('placement permutations', () => {
   });
 
   it('a lone guest leaves the second bed open to a compatible guest once whole rooms run out', async () => {
-    // Nine singles, each in their own room, with distinct profiles except the last two rooms.
-    const profiles: Array<[Gender, RankCode]> = [
-      ['M', 'FO'], ['M', 'FLT_LT'], ['M', 'SQN_LDR'], ['M', 'WG_CDR'], ['M', 'GP_CAPT'],
-      ['F', 'FO'], ['F', 'FLT_LT'], ['F', 'SQN_LDR'], ['F', 'WG_CDR'],
-    ];
-    for (const [g, rk] of profiles) await book({ checkIn: d(0), checkOut: d(2), guests: [G(g, rk)] });
-    // Compatible with an existing single (M/FO) → shares that room's second bed.
-    const share = await book({ checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO')] });
+    // Nine single men of different ranks, each booked into a room of their own while rooms last.
+    const ranks: RankCode[] = ['FO', 'FLT_LT', 'SQN_LDR', 'WG_CDR', 'GP_CAPT', 'AIR_CDRE', 'AVM', 'AM', 'ACM'];
+    for (const rk of ranks) await book({ checkIn: d(0), checkOut: d(2), guests: [G('M', rk)], sharing: false });
+    // Another man, of a rank nobody has: he shares the first room's second bed (ranks may differ).
+    const share = await book({ checkIn: d(0), checkOut: d(2), guests: [G('M', 'MIAF')] });
     expect(share.placements[0]).toMatchObject({ room: 'N-01', bed: 2 });
-    // Incompatible with every occupant → nothing free.
+    // A woman is compatible with no occupant → nothing free.
     const none = await plan({ checkIn: d(0), checkOut: d(2), guests: [G('F', 'AVM')] });
     expect(none.kind).not.toBe('ALLOT');
   });
@@ -363,7 +369,7 @@ describe('full house: alternates, denial, eviction', () => {
       p_category: 'MFA', p_check_in: d(0), p_check_out: d(2), p_guests: [{ seq: 1, gender: 'F', rank_code: 'FO' }],
     });
     const res = await sb.rpc('approve_eviction', {
-      p_incoming: { category: 'MFA', check_in: d(0), check_out: d(2), party_size: 1, guests: [{ seq: 1, gender: 'F', rank_code: 'FO' }] },
+      p_incoming: { category: 'MFA', check_in: d(0), check_out: d(2), party_size: 1, allow_sharing: true, guests: [{ seq: 1, gender: 'F', rank_code: 'FO' }] },
       p_evict_allocation_ids: [cands[0].allocation_id],
       p_reason_enc: 'enc:official-duty-reason',
       p_key_version: 1,
@@ -1211,6 +1217,8 @@ describe('roles and suites', () => {
       expect(b2.party_size).toBe(1);
       expect(b2.preferred_room_type).toBe('NORMAL');
 
+      // Matching personal details through the RPC needs reveal_guest_pii (0027/0030); admins pass.
+      await signInAs('admin');
       // 3. Test Universal Search by Name
       const searchByName = await sb.rpc('search_bookings_and_guests', { p_query: 'Vikram Batra' });
       expect(searchByName.data?.some((r: any) => r.booking_id === bkgId1)).toBe(true);
@@ -1245,6 +1253,7 @@ describe('roles and suites', () => {
           check_out: d(12),
           party_size: 1,
           is_suite_booking: false,
+          allow_sharing: true,
           preferred_room_type: null,
         },
         p_guests: [
@@ -1261,6 +1270,7 @@ describe('roles and suites', () => {
           check_out: d(12),
           party_size: 1,
           is_suite_booking: false,
+          allow_sharing: true,
           preferred_room_type: null,
         },
         p_guests: [
@@ -1315,6 +1325,7 @@ describe('roles and suites', () => {
           check_out: d(12),
           party_size: 1,
           is_suite_booking: false,
+          allow_sharing: true, // so the bed clash, not the room-exclusivity rule, is what rejects it
         },
         p_guests: [
           { seq: 1, gender: 'M', rank_code: 'WG_CDR', guest_name: 'Wing Commander 3' },
@@ -1491,6 +1502,8 @@ describe('roles and suites', () => {
       expect(updatedGuest.phone).toBe(officerPhone);
       expect(updatedGuest.details).toBe('COMPLETE');
 
+      // Matching personal details through the RPC needs reveal_guest_pii (0027/0030); admins pass.
+      await signInAs('admin');
       // 6. Universal search matches by name
       const searchByName = await sb.rpc('search_bookings_and_guests', { p_query: 'Vikram' });
       expect(searchByName.data?.map((r: any) => r.booking_id)).toContain(bookingId);
@@ -2049,5 +2062,195 @@ describe('booking logic review fixes', () => {
     expect(res.error, res.error?.message).toBeNull();
     const row = ((await sb.from('denials').select('*')).data as any[]).find((r) => r.id === res.data);
     expect([row.check_in, row.check_out, row.party_size]).toEqual([d(3), d(5), 2]);
+  });
+});
+
+describe('allow room sharing', () => {
+  /** Books straight into named beds, bypassing the engine, to exercise the database rules. */
+  const placeInto = (a: BookArgs, beds: Array<[guestIndex: number, room: string, bed: 1 | 2]>) =>
+    sb.rpc('create_booking', bookingPayload(a, beds.map(([guestIndex, room, bed]) => ({ guestIndex, roomId: roomIds[room], bedSlot: bed }))));
+
+  const stay = { checkIn: d(0), checkOut: d(2) };
+  const bookingRow = async (id: string) => (await sb.from('bookings').select('*').eq('id', id).single()).data;
+  const occupantsOf = async (room: string, day = d(0)) =>
+    ((await rooms(day, d(1))) as any[]).find((r) => r.room_id === roomIds[room]).occupants as any[];
+
+  it('unchecked offers only fully unoccupied rooms, even with shareable beds free', async () => {
+    await book({ ...stay, guests: [G('M', 'FO')], allow: true }); // N-01 bed 1, shareable
+    const r = await book({ ...stay, guests: [G('M', 'FO')], allow: false });
+    expect(r.placements[0].room).toBe('N-02');
+    // With every room holding one shareable man, an unchecked request has nowhere to go...
+    for (let i = 0; i < 7; i++) await book({ ...stay, guests: [G('M', 'FO')], allow: true });
+    const noRoom = await plan({ ...stay, guests: [G('M', 'FO')], allow: false });
+    expect(noRoom.kind).not.toBe('ALLOT');
+    // ...while a checked one is seated beside him.
+    const shared = await plan({ ...stay, guests: [G('M', 'FO')], allow: true });
+    expect(shared.kind).toBe('ALLOT');
+  });
+
+  it('checked offers empty rooms and shareable beds: empty first, a shared bed when asked or when rooms run out', async () => {
+    await book({ ...stay, guests: [G('M', 'FO')], allow: true });
+    const empty = await plan({ ...stay, guests: [G('M', 'FO')], allow: true });
+    expect(empty.kind === 'ALLOT' && nameOf(empty.assignments[0].roomId)).toBe('N-02');
+    const preferred = await book({ ...stay, guests: [G('M', 'FO')], allow: true, sharing: true });
+    expect(preferred.placements[0]).toMatchObject({ room: 'N-01', bed: 2 });
+  });
+
+  it('different ranks of the same gender share a room; a different gender never does', async () => {
+    await book({ ...stay, guests: [G('M', 'WG_CDR')], allow: true });
+    const sameGender = await book({ ...stay, guests: [G('M', 'FO')], allow: true, sharing: true });
+    expect(sameGender.placements[0]).toMatchObject({ room: 'N-01', bed: 2 });
+
+    await book({ ...stay, guests: [G('M', 'WG_CDR')], allow: true, pref: 'VIP' }); // V-01 bed 1
+    const woman = await placeInto({ ...stay, guests: [G('F', 'WG_CDR')], allow: true }, [[0, 'V-01', 2]]);
+    expect(woman.error?.message).toContain('ERR_SHARE_RULE');
+    const womanOtherRank = await placeInto({ ...stay, guests: [G('F', 'FO')], allow: true }, [[0, 'V-01', 2]]);
+    expect(womanOtherRank.error?.message).toContain('ERR_SHARE_RULE');
+  });
+
+  it('a party pairs equal ranks first, then the same gender whatever the rank', async () => {
+    const r = await book({
+      ...stay,
+      guests: [G('M', 'WG_CDR'), G('M', 'FO'), G('M', 'WG_CDR'), G('M', 'SQN_LDR'), G('F', 'FO')],
+      allow: false,
+    });
+    const roomOf = (i: number) => r.placements.find((p) => p.guest === i)!.room;
+    expect(roomOf(0)).toBe(roomOf(2)); // the two WG_CDRs
+    expect(roomOf(1)).toBe(roomOf(3)); // FO and SQN_LDR share as men
+    expect(new Set(r.placements.map((p) => p.room)).size).toBe(3);
+  });
+
+  it('an exclusive booking blocks the second bed for every other booking, in both directions', async () => {
+    const exclusive = await book({ ...stay, guests: [G('M', 'FO')], allow: false }); // N-01 bed 1
+    const intruder = await placeInto({ ...stay, guests: [G('M', 'FO')], allow: true }, [[0, 'N-01', 2]]);
+    expect(intruder.error?.message).toContain('ERR_ROOM_EXCLUSIVE');
+    expect(userErrorMessage(intruder.error)).toMatch(/sharing/i);
+    // Nothing was left behind by the rejected booking.
+    expect(await occupantsOf('N-01')).toHaveLength(1);
+
+    // A booking that does not allow sharing cannot move in beside a sharing one either.
+    await book({ ...stay, guests: [G('M', 'FO')], allow: true, pref: 'VIP' }); // V-01 bed 1
+    const reverse = await placeInto({ ...stay, guests: [G('M', 'FO')], allow: false }, [[0, 'V-01', 2]]);
+    expect(reverse.error?.message).toContain('ERR_ROOM_EXCLUSIVE');
+
+    // Only overlapping dates count: the day after the exclusive stay the bed is free.
+    const later = await placeInto({ checkIn: d(2), checkOut: d(3), guests: [G('M', 'FO')], allow: false }, [[0, 'N-01', 2]]);
+    expect(later.error, later.error?.message).toBeNull();
+    expect(exclusive.id).toBeTruthy();
+  });
+
+  it('a party of two in one exclusive booking fills its own room as normal', async () => {
+    const r = await book({ ...stay, guests: [G('M', 'FO'), G('M', 'FO')], allow: false });
+    const occ = await occupantsOf(r.placements[0].room);
+    expect(occ).toHaveLength(2);
+    expect(occ.every((o) => o.allowSharing === false)).toBe(true);
+  });
+
+  it('a shared booking leaves its empty bed bookable: daily_room_state flags it shareable', async () => {
+    const a = await book({ ...stay, guests: [G('M', 'FO')], allow: true });
+    const occ = await occupantsOf('N-01');
+    expect(occ).toHaveLength(1);
+    expect(occ[0].allowSharing).toBe(true);
+    const b = await placeInto({ ...stay, guests: [G('M', 'FLT_LT')], allow: true }, [[0, 'N-01', 2]]);
+    expect(b.error, b.error?.message).toBeNull();
+    expect((await occupantsOf('N-01')).map((o) => o.bookingId).sort()).toEqual([a.id, b.data as string].sort());
+  });
+
+  it('the room inventory reports an exclusive lone occupant as holding the room', async () => {
+    await book({ ...stay, guests: [G('M', 'FO')], allow: false }); // N-01
+    await book({ ...stay, guests: [G('M', 'FO')], allow: true, pref: 'VIP' }); // V-01 bed 1
+    const counts = (await sb.rpc('dashboard_counts', { p_date: d(0) })).data[0];
+    // N-01 is full for booking purposes; V-01 still has a bookable bed.
+    expect(counts.one_bed_free_rooms).toBe(1);
+    expect(counts.full_rooms).toBe(1);
+    expect(counts.people_in_house).toBe(2);
+  });
+
+  it('the option is stored on the booking: defaults to off, carried by create_booking_request', async () => {
+    const guests = guestRowsPayload([G('M', 'FO')]);
+    const base = { category: 'LEAVE', check_in: d(0), check_out: d(2), party_size: 1, is_suite_booking: false };
+    const none = await sb.rpc('create_booking_request', { p_booking: base, p_guests: guests });
+    const on = await sb.rpc('create_booking_request', { p_booking: { ...base, allow_sharing: true }, p_guests: guests });
+    expect((await bookingRow(none.data)).allow_sharing).toBe(false);
+    expect((await bookingRow(on.data)).allow_sharing).toBe(true);
+  });
+
+  it('a pending request can change the option; a request that holds beds cannot', async () => {
+    const guests = guestRowsPayload([G('M', 'FO')]);
+    const base = { category: 'LEAVE', check_in: d(0), check_out: d(2), party_size: 1, is_suite_booking: false };
+    const { data: id } = await sb.rpc('create_booking_request', { p_booking: base, p_guests: guests });
+    expect((await bookingRow(id)).allow_sharing).toBe(false);
+
+    const flip = await sb.rpc('set_booking_allow_sharing', { p_booking_id: id, p_allow: true });
+    expect(flip.error, flip.error?.message).toBeNull();
+    expect((await bookingRow(id)).allow_sharing).toBe(true);
+
+    // The saved flag now rules the allotment: it may be seated beside a shareable guest...
+    await book({ ...stay, guests: [G('M', 'FO')], allow: true, pref: 'VIP' }); // V-01 bed 1
+    const allot = await sb.rpc('allot_booking_rooms', {
+      p_booking_id: id,
+      p_allocations: [{ guest_seq: 1, room_id: roomIds['V-01'], bed_slot: 2 }],
+    });
+    expect(allot.error, allot.error?.message).toBeNull();
+
+    // ...and is frozen once beds are held.
+    const late = await sb.rpc('set_booking_allow_sharing', { p_booking_id: id, p_allow: false });
+    expect(late.error?.message).toContain('ERR_BOOKING_NOT_PENDING');
+    expect((await bookingRow(id)).allow_sharing).toBe(true);
+  });
+
+  it('a request left unchecked is refused a shared bed when it is allotted', async () => {
+    const guests = guestRowsPayload([G('M', 'FO')]);
+    await book({ ...stay, guests: [G('M', 'FO')], allow: true, pref: 'VIP' }); // V-01 bed 1
+    const { data: id } = await sb.rpc('create_booking_request', {
+      p_booking: { category: 'LEAVE', check_in: d(0), check_out: d(2), party_size: 1, is_suite_booking: false },
+      p_guests: guests,
+    });
+    const res = await sb.rpc('allot_booking_rooms', {
+      p_booking_id: id,
+      p_allocations: [{ guest_seq: 1, room_id: roomIds['V-01'], bed_slot: 2 }],
+    });
+    expect(res.error?.message).toContain('ERR_ROOM_EXCLUSIVE');
+    expect((await bookingRow(id)).status).toBe('PENDING_ALLOTMENT');
+  });
+
+  it('extending a stay into dates another booking holds in the room is refused for exclusive bookings', async () => {
+    const first = await book({ ...stay, guests: [G('M', 'FO')], allow: false }); // N-01, d0-d2
+    const second = await placeInto({ checkIn: d(2), checkOut: d(4), guests: [G('M', 'FO')], allow: false }, [[0, 'N-01', 1]]);
+    expect(second.error, second.error?.message).toBeNull();
+    const extend = await sb.rpc('update_booking_dates', {
+      p_booking_id: first.id,
+      p_new_check_in: d(0),
+      p_new_check_out: d(3),
+    });
+    expect(extend.error).not.toBeNull();
+    expect(extend.error?.message).toMatch(/ERR_ROOM_EXCLUSIVE|no_double_booking/);
+    expect((await bookingRow(first.id)).check_out).toBe(d(2));
+  });
+
+  it('eviction seats an incoming booking beside the roommate who stays only if both allow sharing', async () => {
+    // Two LEAVE men share N-01. Evict one bed and seat an MFA man (another rank) beside the other.
+    await book({ category: 'LEAVE', ...stay, guests: [G('M', 'FO'), G('M', 'FLT_LT')], allow: true });
+    const evict = async (allowSharing: boolean) => {
+      const { data: cands } = await sb.rpc('eviction_candidates', {
+        p_category: 'MFA', p_check_in: d(0), p_check_out: d(2), p_guests: [{ seq: 1, gender: 'M', rank_code: 'WG_CDR' }],
+      });
+      return sb.rpc('approve_eviction', {
+        p_incoming: {
+          category: 'MFA', check_in: d(0), check_out: d(2), party_size: 1, allow_sharing: allowSharing,
+          guests: [{ seq: 1, gender: 'M', rank_code: 'WG_CDR' }],
+        },
+        p_evict_allocation_ids: [cands[0].allocation_id],
+        p_reason_enc: 'enc:official-duty-reason',
+        p_key_version: 1,
+        p_reason_aad_id: crypto.randomUUID(),
+      });
+    };
+    const refused = await evict(false);
+    expect(refused.error?.message).toContain('ERR_ROOM_EXCLUSIVE');
+    expect(await occupantsOf('N-01')).toHaveLength(2); // atomic: nothing was evicted
+    const seated = await evict(true);
+    expect(seated.error, seated.error?.message).toBeNull();
+    expect(await occupantsOf('N-01')).toHaveLength(2);
   });
 });

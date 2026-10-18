@@ -8,8 +8,7 @@
  * Not a security boundary and not a substitute for the pgTAP suite.
  */
 
-import type { BookingStatus, GuestPii } from '@sms/core';
-import { decryptEnvelope, deriveAllSubkeys, getSessionKey } from '@sms/crypto';
+import { RANKS, type BookingStatus } from '@sms/core';
 
 type Row = Record<string, any>;
 
@@ -247,7 +246,59 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
   const bookingById = (id: string) => db.bookings.find((b) => b.id === id);
   const guestById = (id: string) => db.booking_guests.find((g) => g.id === id);
 
+  /**
+   * public.set_booking_guest_details (0030): NULL leaves a column as it is, '' clears it, and fillOnly
+   * writes only columns that are still empty. Suite bookings are admin-only, like everywhere else.
+   */
+  function applyGuestDetails(
+    guestId: string,
+    v: { p_guest_name?: string | null; p_unit?: string | null; p_service_number?: string | null; p_phone?: string | null },
+    fillOnly: boolean,
+  ) {
+    need(isActiveUser() && hasPerm('enter_guest_details'));
+    const g = guestById(guestId);
+    if (!g) throw new PgError('ERR_NOT_FOUND');
+    if (bookingById(g.booking_id)?.is_suite_booking && !isAdmin()) throw new PgError('ERR_PERMISSION');
+    const next = (current: string | null | undefined, given: string | null | undefined, max: number, standIn = '') => {
+      const value = given == null ? null : given.trim().slice(0, max);
+      if (fillOnly) {
+        const empty = !current || !current.trim() || current.trim() === standIn;
+        return empty && value ? value : (current ?? null);
+      }
+      return value === null ? (current ?? null) : value || null;
+    };
+    // "Officer / Guest" is the stand-in the booking form stores when no name was typed.
+    g.guest_name = next(g.guest_name, v.p_guest_name, 200, 'Officer / Guest');
+    g.unit = next(g.unit, v.p_unit, 200);
+    g.service_number = next(g.service_number, v.p_service_number, 60);
+    g.phone = next(g.phone, v.p_phone, 40);
+  }
+
   // ---- allocation triggers + exclusion constraints ----
+  /** Rows that predate the column (an old persisted dev database) share, like the backfilled rows. */
+  const allowsSharing = (b: Row | undefined) => b?.allow_sharing !== false;
+
+  /** public.trigger_enforce_sharing_rule(): for an ACTIVE allocation `row` about to be written. */
+  function enforceSharingRule(row: Row) {
+    const stay = parseRange(row.stay);
+    const g = guestById(row.guest_id)!;
+    const newAllows = allowsSharing(bookingById(row.booking_id));
+    const others = db.allocations.filter(
+      (a) => a.id !== row.id && a.room_id === row.room_id && a.status === 'ACTIVE' && overlaps(parseRange(a.stay), stay),
+    );
+    // (a)/(b) A booking that does not allow sharing keeps the room to itself, in both directions.
+    if (others.some((a) => a.booking_id !== row.booking_id && (!newAllows || !allowsSharing(bookingById(a.booking_id))))) {
+      throw new PgError('ERR_ROOM_EXCLUSIVE');
+    }
+    // (c) Ranked people: same gender, any rank. A civilian shares only within their own booking.
+    const mismatch = others.some((a) => {
+      const og = guestById(a.guest_id)!;
+      if (og.rank_code && g.rank_code) return og.gender !== g.gender;
+      return a.booking_id !== row.booking_id;
+    });
+    if (mismatch) throw new PgError('ERR_SHARE_RULE');
+  }
+
   function insertAllocation(row: Row) {
     const booking = bookingById(row.booking_id)!;
     const stay = parseRange(row.stay);
@@ -263,16 +314,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       if (db.room_closures.some((c) => c.room_id === row.room_id && overlaps(parseRange(c.period), stay))) {
         throw new PgError('ERR_ROOM_CLOSED');
       }
-      // trg_allocations_sharing_rule: ranked people need the same gender and rank; a civilian
-      // shares only with their own booking.
-      const g = guestById(row.guest_id)!;
-      const mismatch = db.allocations.some((a) => {
-        if (a.room_id !== row.room_id || a.status !== 'ACTIVE' || !overlaps(parseRange(a.stay), stay)) return false;
-        const og = guestById(a.guest_id)!;
-        if (og.rank_code && g.rank_code) return og.gender !== g.gender || og.rank_code !== g.rank_code;
-        return a.booking_id !== row.booking_id;
-      });
-      if (mismatch) throw new PgError('ERR_SHARE_RULE');
+      enforceSharingRule(row);
     }
 
     // trg_allocations_suite_rule
@@ -341,7 +383,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     const bookingStatus: BookingStatus = isPending ? 'PENDING_ALLOTMENT' : 'CONFIRMED';
 
     const bookingId = randomUUID();
-    db.bookings.push({
+    const bookingRow: Row = {
       id: bookingId,
       category,
       status: bookingStatus,
@@ -350,6 +392,8 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       stay: rangeStr(checkIn, checkOut),
       party_size: partySize,
       is_suite_booking: isSuite,
+      // COALESCE((p_booking->>'allow_sharing')::BOOLEAN, FALSE): callers that send none hold their rooms.
+      allow_sharing: pBooking.allow_sharing == null ? false : String(pBooking.allow_sharing) === 'true',
       preferred_room_type: pBooking.preferred_room_type ?? null,
       notes_enc: pBooking.notes_enc ?? null,
       key_version: pBooking.key_version ?? 1,
@@ -359,7 +403,8 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       created_at: nowIso(),
       updated_at: nowIso(),
       deleted_at: null,
-    });
+    };
+    db.bookings.push(bookingRow);
 
     const seqToGuest: Record<string, string> = {};
     for (const g of pGuests) {
@@ -414,9 +459,9 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     }
 
     if (bookingStatus === 'PENDING_ALLOTMENT') {
-      audit('booking_request_created', 'bookings', bookingId, { category, party_size: partySize, is_suite: isSuite });
+      audit('booking_request_created', 'bookings', bookingId, { category, party_size: partySize, is_suite: isSuite, allow_sharing: bookingRow.allow_sharing });
     } else {
-      audit('booking_created', 'bookings', bookingId, { category, party_size: partySize, is_suite: isSuite });
+      audit('booking_created', 'bookings', bookingId, { category, party_size: partySize, is_suite: isSuite, allow_sharing: bookingRow.allow_sharing });
     }
 
     emit('bookings');
@@ -593,6 +638,26 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       return null;
     },
 
+    set_booking_allow_sharing: (a) => {
+      need(isActiveUser() && (hasPerm('create_booking') || isAdmin()));
+      if (a.p_allow == null) throw new PgError('ERR_INVALID_REQUEST');
+      const b = bookingById(a.p_booking_id);
+      if (!b) throw new PgError('ERR_NOT_FOUND');
+      const holdsNoBed = !db.allocations.some((al) => al.booking_id === b.id && al.status === 'ACTIVE');
+      if (!(b.status === 'PENDING_ALLOTMENT' || (b.status === 'CONFIRMED' && holdsNoBed))) {
+        throw new PgError('ERR_BOOKING_NOT_PENDING');
+      }
+      if (b.is_suite_booking && !isAdmin()) throw new PgError('ERR_SUITE_ONLY_ADMIN');
+      const allow = Boolean(a.p_allow);
+      if (allowsSharing(b) !== allow) {
+        b.allow_sharing = allow;
+        b.updated_at = nowIso();
+        audit('booking_sharing_changed', 'bookings', b.id, { allow_sharing: allow });
+        emit('bookings');
+      }
+      return null;
+    },
+
     cancel_booking: (a) => {
       need(isActiveUser() && hasPerm('cancel_booking'));
       const b = bookingById(a.p_id);
@@ -612,18 +677,26 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     },
 
     set_booking_guest_details: (a) => {
-      need(isActiveUser() && (hasPerm('create_booking') || hasPerm('enter_guest_details') || isAdmin()));
-      const g = guestById(a.p_guest_id);
-      if (!g) {
-        throw new PgError('Guest not found', 'P0001');
-      }
-      g.guest_name = a.p_guest_name;
-      g.unit = a.p_unit;
-      g.service_number = a.p_service_number;
-      g.phone = a.p_phone;
-      g.details = 'COMPLETE';
+      applyGuestDetails(a.p_guest_id, a, !!a.p_fill_only);
+      if (!a.p_fill_only) audit('guest_details_set', 'booking_guests', a.p_guest_id, {});
       emit('booking_guests');
       return null;
+    },
+
+    set_booking_guest_details_batch: (a) => {
+      need(isActiveUser() && hasPerm('enter_guest_details'));
+      if (!Array.isArray(a.p_rows)) throw new PgError('ERR_INVALID_ROWS');
+      if (a.p_rows.length > 200) throw new PgError('ERR_INVALID_LIMIT');
+      for (const r of a.p_rows as Row[]) {
+        applyGuestDetails(
+          r.guest_id,
+          { p_guest_name: r.guest_name, p_unit: r.unit, p_service_number: r.service_number, p_phone: r.phone },
+          true,
+        );
+      }
+      if (a.p_rows.length > 0) audit('guest_details_backfilled', 'booking_guests', null, { count: a.p_rows.length });
+      emit('booking_guests');
+      return a.p_rows.length;
     },
 
     set_guest_pii: (a) => {
@@ -660,89 +733,54 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       return [...ids].map((booking_id) => ({ booking_id }));
     },
 
+    // Mirrors public.search_bookings_and_guests (0030): literal substring match; personal details need
+    // reveal_guest_pii (or admin); suite bookings are admin-only. The server cannot read encrypted
+    // records, so the only encrypted field it matches is the exact ID-number blind index.
     search_bookings_and_guests: (a) => {
       need(isActiveUser());
       const q = String(a.p_query ?? '').trim().toLowerCase();
       if (!q) return [];
+      const admin = isAdmin();
+      const canPii = admin || hasPerm('reveal_guest_pii');
+      const visible = (b: Row | undefined) => !!b && (!b.is_suite_booking || admin);
+      const has = (v: unknown) => typeof v === 'string' && v.toLowerCase().includes(q);
       const ids = new Set<string>();
 
-      // Match guest_code, rank_code, guest_name, unit, service_number, phone
       db.booking_guests.forEach((g) => {
+        if (!visible(bookingById(g.booking_id))) return;
+        const label = RANKS.find((r) => r.code === g.rank_code)?.label;
         if (
-          (g.guest_code && g.guest_code.toLowerCase().includes(q)) ||
-          (g.rank_code && g.rank_code.toLowerCase().includes(q)) ||
-          (g.guest_name && g.guest_name.toLowerCase().includes(q)) ||
-          (g.unit && g.unit.toLowerCase().includes(q)) ||
-          (g.service_number && g.service_number.toLowerCase().includes(q)) ||
-          (g.phone && g.phone.toLowerCase().includes(q))
+          has(g.guest_code) ||
+          has(g.rank_code) ||
+          has(typeof g.rank_code === 'string' ? g.rank_code.replace(/_/g, ' ') : null) ||
+          has(label) ||
+          (canPii && (has(g.guest_name) || has(g.unit) || has(g.service_number) || has(g.phone)))
         ) {
           ids.add(g.booking_id);
         }
       });
 
-      // Match room names and room display order
-      db.rooms.forEach((r) => {
-        const rName = r.name || `Room ${r.display_order}`;
-        if (rName.toLowerCase().includes(q) || String(r.display_order) === q) {
-          db.allocations.forEach((al) => {
-            if (al.room_id === r.id && al.status === 'ACTIVE') {
-              ids.add(al.booking_id);
-            }
-          });
-        }
-      });
-
-      // Match booking id, category
       db.bookings.forEach((b) => {
+        if (!visible(b)) return;
         if (
-          b.id.toLowerCase().includes(q) ||
-          b.category.toLowerCase().includes(q)
+          has(b.id) ||
+          has(b.category) ||
+          has(b.status) ||
+          has(typeof b.status === 'string' ? b.status.replace(/_/g, ' ') : null) ||
+          has(b.check_in) ||
+          has(b.check_out)
         ) {
           ids.add(b.id);
         }
       });
 
-      // Match blind index
-      db.guest_pii.forEach((p) => {
-        if (p.id_blind_index && p.id_blind_index.toLowerCase() === q) {
-          const g = guestById(p.guest_id);
-          if (g) ids.add(g.booking_id);
-        }
-      });
-
-      // Match decrypted guest PII if session is unlocked
-      try {
-        const session = getSessionKey();
-        if (session) {
-          const subkeys = deriveAllSubkeys(session.teamKey);
-          db.guest_pii.forEach((p) => {
-            if (!p.pii_enc) return;
-            try {
-              const aad = `guest_pii.pii_enc.${p.guest_id}`;
-              const json = decryptEnvelope({
-                envelope: p.pii_enc,
-                subkey: subkeys.pii,
-                aad,
-                allowedKeyVersions: [session.version],
-              });
-              const pii = JSON.parse(json) as GuestPii;
-              if (
-                (pii.name && pii.name.toLowerCase().includes(q)) ||
-                (pii.phone && pii.phone.toLowerCase().includes(q)) ||
-                (pii.serviceNumber && pii.serviceNumber.toLowerCase().includes(q)) ||
-                (pii.unit && pii.unit.toLowerCase().includes(q)) ||
-                (pii.idNumber && pii.idNumber.toLowerCase().includes(q))
-              ) {
-                const g = guestById(p.guest_id);
-                if (g) ids.add(g.booking_id);
-              }
-            } catch {
-              // ignore decryption failure
-            }
-          });
-        }
-      } catch {
-        // ignore session error
+      if (canPii) {
+        db.guest_pii.forEach((p) => {
+          if (p.id_blind_index && p.id_blind_index.toLowerCase() === q) {
+            const g = guestById(p.guest_id);
+            if (g && visible(bookingById(g.booking_id))) ids.add(g.booking_id);
+          }
+        });
       }
 
       return [...ids].map((booking_id) => ({ booking_id, match_source: 'general' }));
@@ -777,6 +815,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
                 bookingStatus: b?.status,
                 checkIn: b?.check_in,
                 checkOut: b?.check_out,
+                allowSharing: allowsSharing(b),
               };
             });
           out.push({
@@ -800,10 +839,13 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       let free = 0, one = 0, full = 0, oos = 0, people = 0;
       for (const r of rooms) {
         const closed = db.room_closures.some((c) => c.room_id === r.id && overlaps(parseRange(c.period), day));
-        const n = db.allocations.filter((al) => al.room_id === r.id && al.status === 'ACTIVE' && overlaps(parseRange(al.stay), day)).length;
+        const here = db.allocations.filter((al) => al.room_id === r.id && al.status === 'ACTIVE' && overlaps(parseRange(al.stay), day));
+        const n = here.length;
+        // A room held by a non-sharing booking has no bookable bed left even with one guest in it.
+        const held = here.some((al) => !allowsSharing(bookingById(al.booking_id)));
         if (closed) oos++;
         else if (n === 0) free++;
-        else if (n === 1) one++;
+        else if (n === 1 && !held) one++;
         else full++;
         people += n;
       }
@@ -1166,6 +1208,8 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       b.updated_at = nowIso();
 
       for (const al of activeAllocs) {
+        // trg_allocations_sharing_rule fires on the stay update too.
+        enforceSharingRule({ ...al, stay: rangeStr(newCheckIn, newCheckOut) });
         al.stay = rangeStr(newCheckIn, newCheckOut);
         al.updated_at = nowIso();
       }
@@ -1189,6 +1233,18 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       throw new PgError('Key rotation is not available in the dev backend');
     };
   }
+
+  // public.admin_page_guest_pii (0013): admin-only bulk read of ciphertexts. Also used by the
+  // guest-details backfill, so it works here even though key rotation does not.
+  rpcs.admin_page_guest_pii = (a) => {
+    need(isAdmin());
+    audit('guest_pii_bulk_read', 'guest_pii', null, { key_version: a.p_key_version, limit: a.p_limit });
+    return db.guest_pii
+      .filter((p) => p.key_version === a.p_key_version && (!a.p_after_guest_id || p.guest_id > a.p_after_guest_id))
+      .sort((x, y) => (x.guest_id < y.guest_id ? -1 : 1))
+      .slice(0, a.p_limit ?? 200)
+      .map((p) => ({ guest_id: p.guest_id, pii_enc: p.pii_enc, key_version: p.key_version }));
+  };
 
   // ---- table access (RLS + grants) ----
   const SELECTABLE = new Set(['profiles', 'rooms', 'room_closures', 'devices', 'bookings', 'booking_guests', 'allocations', 'audit_log', 'evictions', 'denials']);
@@ -1380,22 +1436,13 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     private runUpdate() {
       const snap = clone(db);
       try {
-        if (this.table !== 'rooms' && this.table !== 'booking_guests') {
+        // Only rooms have a direct UPDATE grant (0016). booking_guests is written through RPCs
+        // (set_booking_guest_details, set_guest_pii), exactly as in the real database.
+        if (this.table !== 'rooms') {
           throw new PgError(`permission denied for table ${this.table}`, '42501');
         }
         const rlsDenied = () =>
           new PgError(`new row violates row-level security policy for table "${this.table}"`, '42501');
-
-        if (this.table === 'booking_guests') {
-          if (!isActiveUser()) throw rlsDenied();
-          const targets = db.booking_guests.filter((r) => this.filters.every((f) => f(r)));
-          for (const r of targets) {
-            Object.assign(r, this.payload);
-          }
-          persist();
-          emit('booking_guests');
-          return this.finish(targets.map((r) => clone(project(this.table, r, this.selectNode))), targets.length);
-        }
 
         if (!(isActiveUser() && hasPerm('manage_rooms'))) throw rlsDenied();
 
@@ -1441,7 +1488,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       const data = fn(args);
       persist();
       // Only booking writes notify realtime subscribers; read RPCs must not (they'd refetch forever).
-      if (['create_booking', 'cancel_booking', 'approve_eviction', 'allot_booking_rooms', 'create_booking_request', 'record_denial', 'update_booking_dates'].includes(name)) {
+      if (['create_booking', 'cancel_booking', 'approve_eviction', 'allot_booking_rooms', 'create_booking_request', 'record_denial', 'update_booking_dates', 'set_booking_allow_sharing'].includes(name)) {
         ['allocations', 'bookings', 'booking_guests', 'rooms'].forEach(emit);
       }
       return { data: data === undefined ? null : clone(data), error: null };

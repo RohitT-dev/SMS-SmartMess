@@ -11,6 +11,7 @@ import { Badge } from '../../../../src/ui/primitives/Badge';
 import { spacing, typography } from '../../../../src/ui/tokens';
 import { supabase } from '../../../../src/lib/supabase';
 import { decryptRoomName } from '../../../../src/features/crypto-session/cryptoSession';
+import { guestLine } from '../../../../src/features/bookings/guestDisplay';
 
 export default function BookingConfirmedScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -61,6 +62,19 @@ export default function BookingConfirmedScreen() {
               <Text style={[styles.metaValue, { color: colors.text }]}>
                 {booking?.party_size} person(s)
               </Text>
+            </View>
+
+            <View style={styles.metaRow}>
+              <Text style={[styles.metaLabel, { color: colors.muted }]}>Guests:</Text>
+              <View style={{ flex: 1, alignItems: 'flex-end', gap: 2 }}>
+                {[...(booking?.booking_guests ?? [])]
+                  .sort((a: any, b: any) => a.seq - b.seq)
+                  .map((g: any, i: number) => (
+                    <Text key={g.id} style={[styles.metaValue, { color: colors.text, textAlign: 'right' }]}>
+                      {guestLine(g, null, i)}
+                    </Text>
+                  ))}
+              </View>
             </View>
 
             <View style={styles.metaRow}>

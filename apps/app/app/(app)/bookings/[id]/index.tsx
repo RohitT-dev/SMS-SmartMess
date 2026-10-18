@@ -12,6 +12,7 @@ import { MaskedValue } from '../../../../src/ui/primitives/MaskedValue';
 import { Dialog } from '../../../../src/ui/primitives/Dialog';
 import { Field } from '../../../../src/ui/primitives/Field';
 import { Banner } from '../../../../src/ui/primitives/Banner';
+import { Checkbox } from '../../../../src/ui/primitives/Checkbox';
 import { DateRange } from '../../../../src/ui/primitives/DateRange';
 import { spacing, typography } from '../../../../src/ui/tokens';
 import { supabase } from '../../../../src/lib/supabase';
@@ -27,6 +28,13 @@ import {
 } from '../../../../src/features/crypto-session/cryptoSession';
 import { humanizeStatus } from '../../../../src/lib/labels';
 import { describeGuest } from '../../../../src/features/bookings/party';
+import {
+  guestName,
+  guestPhone,
+  guestRankOrRelation,
+  guestServiceNumber,
+  guestUnit,
+} from '../../../../src/features/bookings/guestDisplay';
 import { fetchRoomDayStates } from '../../../../src/features/bookings/roomState';
 import { alternatesHorizonEnd } from '../../../../src/features/bookings/planBooking';
 import { useRoomNames } from '../../../../src/features/rooms/useRoomNames';
@@ -122,10 +130,31 @@ export default function BookingDetailRecordScreen() {
         checkOut: booking.check_out,
         guests: guestsDemand,
         preferredRoomType: (booking.preferred_room_type ?? undefined) as RoomType | undefined,
+        // "Allow room sharing" as saved on the request: off offers only fully vacant rooms.
+        allowSharing: booking.allow_sharing !== false,
       },
       roomStates,
     );
   }, [isPendingAllotment, roomStates, booking, guestsDemand]);
+
+  const [savingSharing, setSavingSharing] = useState(false);
+  const handleToggleSharing = async (next: boolean) => {
+    setSavingSharing(true);
+    setErrorMsg(null);
+    try {
+      const { error } = await supabase.rpc('set_booking_allow_sharing', { p_booking_id: id, p_allow: next });
+      if (error) throw error;
+      logAction('bookings.set_sharing', { entity: 'bookings', entityId: id, meta: { allow_sharing: next } });
+      queryClient.invalidateQueries({ queryKey: ['booking_record', id] });
+      queryClient.invalidateQueries({ queryKey: ['booking_audit', id] });
+      queryClient.invalidateQueries({ queryKey: ['bookings_ledger'] });
+      queryClient.invalidateQueries({ queryKey: ['pending_booking_requests'] });
+    } catch (err: unknown) {
+      setErrorMsg(userErrorMessage(err, 'Could not change room sharing'));
+    } finally {
+      setSavingSharing(false);
+    }
+  };
 
   const handleAllotSuggested = async () => {
     if (!allotmentPlan || allotmentPlan.kind !== 'ALLOT' || !booking) return;
@@ -176,6 +205,7 @@ export default function BookingDetailRecordScreen() {
           checkIn: booking.check_in,
           checkOut: booking.check_out,
           preferredRoomType: booking.preferred_room_type || undefined,
+          allowSharing: booking.allow_sharing !== false,
           guests: guestsDemand,
         }),
       },
@@ -191,6 +221,7 @@ export default function BookingDetailRecordScreen() {
       checkIn: booking.check_in,
       checkOut: booking.check_out,
       preferredRoomType: booking.preferred_room_type || undefined,
+      allowSharing: booking.allow_sharing !== false,
       guests: sortedGuests.map((g: any) => ({
         gender: g.gender as Gender,
         rankCode: (g.rank_code ?? null) as RankCode | null,
@@ -232,10 +263,14 @@ export default function BookingDetailRecordScreen() {
       meta: { booking_id: id },
     });
     if (!cipher) return 'Details Pending';
+    // Name, unit, service number and phone are shown in plain text on the guest card; only the
+    // ID number and remarks are encrypted.
     const pii = decryptGuestPii(guestId, cipher);
-    const guest = booking?.booking_guests?.find((g: any) => g.id === guestId);
-    if (guest && !guest.rank_code) return `${pii.name} (Phone: ${pii.phone || 'N/A'})`;
-    return `${pii.name} (Service No: ${pii.serviceNumber || 'N/A'}, Phone: ${pii.phone || 'N/A'}, Unit: ${pii.unit || 'N/A'})`;
+    const parts = [
+      `${pii.idType?.trim() || 'ID'}: ${pii.idNumber?.trim() || 'N/A'}`,
+      pii.notes?.trim() ? `Notes: ${pii.notes.trim()}` : null,
+    ];
+    return parts.filter(Boolean).join(' · ');
   };
 
   const handleCancelBooking = async () => {
@@ -357,6 +392,12 @@ export default function BookingDetailRecordScreen() {
               </Text>
             </View>
             <View style={styles.gridCol}>
+              <Text style={[styles.label, { color: colors.muted }]}>Room Sharing</Text>
+              <Text style={[styles.value, { color: colors.text }]}>
+                {booking?.allow_sharing === false ? 'Not allowed' : 'Allowed'}
+              </Text>
+            </View>
+            <View style={styles.gridCol}>
               <Text style={[styles.label, { color: colors.muted }]}>Created At</Text>
               <Text style={[styles.value, { color: colors.text }]}>
                 {booking?.created_at ? new Date(booking.created_at).toLocaleString() : 'N/A'}
@@ -394,8 +435,22 @@ export default function BookingDetailRecordScreen() {
               <Badge label="Suggestions Live" variant="warning" />
             </View>
             <Text style={[styles.helpText, { color: colors.muted }]}>
-              Automated allotment suggestions computed from live room inventory, gender, and rank sharing rules.
+              Automated allotment suggestions computed from live room inventory and the room sharing rules
+              (ranked guests share with the same gender, any rank; civilians only within their own booking).
             </Text>
+            {canAllot && (
+              <Checkbox
+                label="Allow room sharing"
+                hint={
+                  booking?.allow_sharing !== false
+                    ? 'Fully vacant rooms and rooms with a free bed beside a compatible guest are suggested.'
+                    : 'Only fully vacant rooms are suggested; this booking holds each room it uses.'
+                }
+                checked={booking?.allow_sharing !== false}
+                onChange={handleToggleSharing}
+                disabled={savingSharing || !booking}
+              />
+            )}
 
             {loadingRoomStates ? (
               <Text style={{ color: colors.muted, marginVertical: spacing.sm, fontSize: typography.sm }}>
@@ -423,7 +478,7 @@ export default function BookingDetailRecordScreen() {
                       const guest = booking?.booking_guests?.find((g: any) => g.seq === a.guestIndex + 1);
                       return (
                         <Text key={a.guestIndex} style={[styles.proposalRow, { color: colors.text }]}>
-                          Guest #{a.guestIndex + 1} ({guest ? `${guest.rank_code}, ${guest.gender === 'M' ? 'Male' : 'Female'}` : ''}) → Room{' '}
+                          {guest ? guestName(guest, null, a.guestIndex) : `Guest #${a.guestIndex + 1}`} ({guest ? `${guestRankOrRelation(guest)}, ${guest.gender === 'M' ? 'Male' : 'Female'}` : ''}) → Room{' '}
                           <Text style={{ fontWeight: 'bold' }}>{roomNames?.[a.roomId] ?? '…'}</Text> ({a.roomType}), Bed Slot <Text style={{ fontWeight: 'bold' }}>{a.bedSlot}</Text>
                         </Text>
                       );
@@ -497,8 +552,22 @@ export default function BookingDetailRecordScreen() {
               <View style={styles.guestItemHeader}>
                 <View>
                   <Text style={[styles.guestName, { color: colors.navy }]}>
-                    #{idx + 1}: {describeGuest(guest)}
+                    #{idx + 1}: {guestName(guest, null, idx)}
                   </Text>
+                  <Text style={{ fontSize: typography.sm, color: colors.text, marginTop: 2 }}>
+                    {describeGuest(guest)}
+                  </Text>
+                  {guestUnit(guest) || guestServiceNumber(guest) || guestPhone(guest) ? (
+                    <Text style={{ fontSize: typography.sm, color: colors.muted, marginTop: 2 }}>
+                      {[
+                        guestUnit(guest) && `Unit: ${guestUnit(guest)}`,
+                        guestServiceNumber(guest) && `Service No: ${guestServiceNumber(guest)}`,
+                        guestPhone(guest) && `Phone: ${guestPhone(guest)}`,
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </Text>
+                  ) : null}
                   {guest.guest_code ? (
                     <Text style={{ fontSize: typography.xs, color: colors.blue, fontWeight: 'bold', marginTop: 2 }}>
                       Unique Guest ID: {guest.guest_code}
@@ -512,8 +581,8 @@ export default function BookingDetailRecordScreen() {
               </View>
 
               <MaskedValue
-                label="Guest Identity & Contact"
-                maskedText="•••••••• •••••••••••• (Masked for privacy)"
+                label="ID Number & Notes"
+                maskedText="•••••••• •••••••••••• (Encrypted; reveal to read)"
                 onReveal={() => fetchGuestPii(guest.id)}
                 canReveal={canReveal}
               />

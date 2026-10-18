@@ -19,6 +19,7 @@ export function mapRoomDayState(row: DailyRoomStateRow): RoomDayState {
     date: row.date,
     bedsTaken: row.beds_taken,
     isClosed: row.is_closed,
-    occupants: row.occupants ?? [],
+    // Occupants of a server that predates room sharing carry no flag; they share, like the backfilled rows.
+    occupants: (row.occupants ?? []).map((o) => ({ ...o, allowSharing: o.allowSharing ?? true })),
   };
 }

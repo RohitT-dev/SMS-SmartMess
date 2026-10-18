@@ -9,8 +9,14 @@ export const ERROR_MAPPINGS: Record<string, AppErrorDetails> = {
   ERR_SHARE_RULE: {
     code: 'ERR_SHARE_RULE',
     title: 'Room Sharing Rule Violation',
-    message: 'Two guests may share a room only if they share both the same gender and the same rank.',
-    actionGuidance: 'Select separate whole rooms or pair guests with identical gender and rank.'
+    message: 'Two ranked guests may share a room only if they are of the same gender; a civilian may share only with members of their own booking.',
+    actionGuidance: 'Select separate whole rooms or pair guests of the same gender.'
+  },
+  ERR_ROOM_EXCLUSIVE: {
+    code: 'ERR_ROOM_EXCLUSIVE',
+    title: 'Room Held by Another Booking',
+    message: 'Room sharing is not allowed here: either this booking does not allow room sharing, or the booking already in the room does not.',
+    actionGuidance: 'Choose a fully vacant room, or tick "Allow room sharing" on this request and pick a room whose occupant also allows sharing.'
   },
   ERR_DOUBLE_BOOKED: {
     code: 'ERR_DOUBLE_BOOKED',

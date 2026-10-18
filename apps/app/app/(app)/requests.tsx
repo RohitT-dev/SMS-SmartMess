@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -19,7 +19,14 @@ import { EmptyState } from '../../src/ui/primitives/EmptyState';
 import { layout, spacing, typography } from '../../src/ui/tokens';
 import { supabase } from '../../src/lib/supabase';
 import { logAction } from '../../src/lib/activityLog';
-import { decryptGuestPii, encryptReason, getActiveKeyVersion } from '../../src/features/crypto-session/cryptoSession';
+import { encryptReason, getActiveKeyVersion } from '../../src/features/crypto-session/cryptoSession';
+import {
+  guestPhone,
+  guestRankedName,
+  guestServiceNumber,
+  guestUnit,
+  realGuestName,
+} from '../../src/features/bookings/guestDisplay';
 import { fetchPendingAllotment } from '../../src/features/bookings/pendingRequests';
 import { userErrorMessage } from '../../src/lib/userError';
 import { Banner } from '../../src/ui/primitives/Banner';
@@ -93,37 +100,6 @@ export default function BookingRequestsScreen() {
     };
   }, [refetch]);
 
-  // Query guest PII records to resolve guest names if decrypted session is unlocked
-  const { data: piiRows } = useQuery({
-    queryKey: ['guest_pii_for_requests'],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('guest_pii').select('guest_id, pii_enc');
-      if (error) return [];
-      return data || [];
-    },
-  });
-
-  const piiMap = useMemo(() => {
-    const map = new Map<string, { name: string; serviceNumber?: string | null; unit?: string | null; phone?: string | null }>();
-    if (!piiRows) return map;
-    for (const p of piiRows) {
-      if (p.pii_enc) {
-        try {
-          const dec = decryptGuestPii(p.guest_id, p.pii_enc);
-          map.set(p.guest_id, {
-            name: dec.name,
-            serviceNumber: dec.serviceNumber,
-            unit: dec.unit,
-            phone: dec.phone,
-          });
-        } catch {
-          // session locked
-        }
-      }
-    }
-    return map;
-  }, [piiRows]);
-
   const handleAllotRooms = (req: PendingBookingRequest) => {
     // Navigate to room allotment screen with payload
     const payload = JSON.stringify({
@@ -134,18 +110,15 @@ export default function BookingRequestsScreen() {
       preferredRoomType: req.preferred_room_type || undefined,
       guests: req.booking_guests
         .sort((a, b) => a.seq - b.seq)
-        .map((g) => {
-          const pii = piiMap.get(g.id);
-          return {
-            gender: g.gender,
-            rankCode: g.rank_code,
-            relation: g.relation ?? undefined,
-            name: g.guest_name || pii?.name || undefined,
-            serviceNumber: g.service_number || pii?.serviceNumber || undefined,
-            unit: g.unit || pii?.unit || undefined,
-            phone: g.phone || pii?.phone || undefined,
-          };
-        }),
+        .map((g) => ({
+          gender: g.gender,
+          rankCode: g.rank_code,
+          relation: g.relation ?? undefined,
+          name: realGuestName(g.guest_name) || undefined,
+          serviceNumber: guestServiceNumber(g) || undefined,
+          unit: guestUnit(g) || undefined,
+          phone: guestPhone(g) || undefined,
+        })),
     });
 
     router.push({
@@ -269,15 +242,14 @@ export default function BookingRequestsScreen() {
                       </Text>
                     </View>
                     {sortedGuests.map((g, idx) => {
-                      const pii = piiMap.get(g.id);
-                      const displayName = g.guest_name || pii?.name || (g.guest_code ? `Guest (${g.guest_code})` : `Guest ${idx + 1}`);
+                      const displayName = guestRankedName(g, null, idx);
 
                       return (
                         <Pressable
                           key={g.id}
                           onPress={() => handleAllotRooms(req)}
                           accessibilityRole="button"
-                          accessibilityLabel={`Assign room for ${g.rank_code} ${displayName}`}
+                          accessibilityLabel={`Assign room for ${displayName}`}
                           style={({ pressed }) => [
                             styles.guestRow,
                             { borderBottomColor: colors.border },
@@ -290,8 +262,8 @@ export default function BookingRequestsScreen() {
                           </View>
                           <View style={{ flex: 1 }}>
                             <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.xs, flexWrap: 'wrap' }}>
-                              <Text style={[styles.guestNameText, { color: colors.navy }]}>
-                                {g.rank_code} <Text style={{ color: colors.blue, textDecorationLine: 'underline' }}>{displayName}</Text>
+                              <Text style={[styles.guestNameText, { color: colors.blue, textDecorationLine: 'underline' }]}>
+                                {displayName}
                               </Text>
                               {g.guest_code ? (
                                 <Text style={[styles.guestCodeBadge, { color: colors.muted }]}>
@@ -302,9 +274,9 @@ export default function BookingRequestsScreen() {
                             <Text style={[styles.guestMetaText, { color: colors.muted }]}>
                               {[
                                 `Gender: ${g.gender === 'M' ? 'Male' : 'Female'}`,
-                                (g.service_number || pii?.serviceNumber) && `Service No: ${g.service_number || pii?.serviceNumber}`,
-                                (g.unit || pii?.unit) && `Unit: ${g.unit || pii?.unit}`,
-                                (g.phone || pii?.phone) && `Phone: ${g.phone || pii?.phone}`,
+                                guestServiceNumber(g) && `Service No: ${guestServiceNumber(g)}`,
+                                guestUnit(g) && `Unit: ${guestUnit(g)}`,
+                                guestPhone(g) && `Phone: ${guestPhone(g)}`,
                               ]
                                 .filter(Boolean)
                                 .join(' · ')}

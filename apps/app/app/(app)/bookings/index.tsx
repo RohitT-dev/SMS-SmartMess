@@ -1,7 +1,8 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { View, Text, StyleSheet, Pressable, useWindowDimensions } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { RANKS } from '@sms/core';
 import { useThemeStore } from '../../../src/state/themeStore';
 import { Screen } from '../../../src/ui/primitives/Screen';
 import { Card } from '../../../src/ui/primitives/Card';
@@ -10,15 +11,31 @@ import { Field } from '../../../src/ui/primitives/Field';
 import { Select } from '../../../src/ui/primitives/Select';
 import { Badge } from '../../../src/ui/primitives/Badge';
 import { Button } from '../../../src/ui/primitives/Button';
+import { Checkbox } from '../../../src/ui/primitives/Checkbox';
+import { DateRange } from '../../../src/ui/primitives/DateRange';
 import { spacing, typography } from '../../../src/ui/tokens';
 import { supabase } from '../../../src/lib/supabase';
 import { logAction } from '../../../src/lib/activityLog';
-import {
-  computeIdBlindIndex,
-  decryptGuestPii,
-} from '../../../src/features/crypto-session/cryptoSession';
+import { addDaysToDateString, isValidDateString, localDateString } from '../../../src/lib/dates';
+import { computeIdBlindIndex } from '../../../src/features/crypto-session/cryptoSession';
 import { useRoomNames } from '../../../src/features/rooms/useRoomNames';
 import { fetchPendingAllotment } from '../../../src/features/bookings/pendingRequests';
+import {
+  guestDetailLine,
+  guestName,
+  guestPhone,
+  guestRankedName,
+  guestServiceNumber,
+  guestUnit,
+  realGuestName,
+} from '../../../src/features/bookings/guestDisplay';
+import {
+  ALL,
+  effectiveBookingStatus,
+  filterBookings,
+  type BookingFilters,
+  type SearchableBooking,
+} from '../../../src/features/bookings/searchBookings';
 import { userErrorMessage } from '../../../src/lib/userError';
 import { Banner } from '../../../src/ui/primitives/Banner';
 import { humanizeStatus } from '../../../src/lib/labels';
@@ -35,14 +52,62 @@ const statusVariant = (status: string) =>
 const categoryVariant = (category: string) =>
   category === 'MFA' ? 'success' : category === 'PI' ? 'warning' : 'default';
 
+type LedgerBooking = SearchableBooking & Record<string, any>;
+
+const PAGE_SIZE = 15;
+const SEARCH_DEBOUNCE_MS = 300;
+/** Searching and filtering load the bookings themselves (room names are encrypted, so rooms cannot be matched in SQL). */
+const CORPUS_PAGE = 1000;
+const CORPUS_MAX_PAGES = 3;
+const LEDGER_SELECT = '*, booking_guests(*), allocations(*)';
+
+async function fetchSearchCorpus(): Promise<LedgerBooking[]> {
+  const rows: LedgerBooking[] = [];
+  for (let page = 0; page < CORPUS_MAX_PAGES; page++) {
+    const { data, error } = await supabase
+      .from('bookings')
+      .select(LEDGER_SELECT)
+      .order('created_at', { ascending: false })
+      .range(page * CORPUS_PAGE, (page + 1) * CORPUS_PAGE - 1);
+    if (error) throw error;
+    rows.push(...((data ?? []) as LedgerBooking[]));
+    if (!data || data.length < CORPUS_PAGE) break;
+  }
+  return rows;
+}
+
+/**
+ * Booking ids the server matched: guest code, rank, booking id, status and dates (and personal
+ * details for users allowed to reveal them), plus an exact ID-number match through the blind
+ * index. Best effort: the on-screen search already covers everything that is loaded.
+ */
+async function fetchServerHits(q: string): Promise<string[]> {
+  const ids = new Set<string>();
+  try {
+    const { data } = await supabase.rpc('search_bookings_and_guests', { p_query: q });
+    if (Array.isArray(data)) data.forEach((r: any) => r?.booking_id && ids.add(r.booking_id));
+  } catch {
+    // The list still searches what is loaded.
+  }
+  if (q.replace(/\s/g, '').length >= 6) {
+    try {
+      const { data } = await supabase.rpc('search_guests_by_blind_index', { p_blind: computeIdBlindIndex(q) });
+      if (Array.isArray(data)) data.forEach((r: any) => r?.booking_id && ids.add(r.booking_id));
+    } catch {
+      // Session locked, no permission to reveal ID numbers, or not an ID number.
+    }
+  }
+  return [...ids];
+}
+
 export default function BookingsLedgerScreen() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const colors = useThemeStore((s) => s.colors);
   const { width } = useWindowDimensions();
   const { data: roomNames } = useRoomNames();
   // Wide screens get the table; anything narrower gets cards so Status/Action are never off-screen.
   const useCards = width < 960;
-  const [searchError, setSearchError] = useState<string | null>(null);
 
   const roomsOf = (item: any): string => {
     if (item.status === 'PENDING_ALLOTMENT') return 'Pending Allotment';
@@ -53,178 +118,81 @@ export default function BookingsLedgerScreen() {
     return names.size ? [...names].join(', ') : '—';
   };
 
-  // Query guest PII records to resolve guest names if decrypted session is unlocked
-  const { data: piiRows } = useQuery({
-    queryKey: ['guest_pii_for_ledger'],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('guest_pii').select('guest_id, pii_enc');
-      if (error) return [];
-      return data || [];
-    },
-  });
+  const sortedGuests = (item: any): any[] =>
+    [...(item.booking_guests || [])].sort((a: any, b: any) => (a.seq ?? 0) - (b.seq ?? 0));
 
-  const piiMap = useMemo(() => {
-    const map = new Map<string, { name: string; serviceNumber?: string | null; unit?: string | null; phone?: string | null }>();
-    if (!piiRows) return map;
-    for (const p of piiRows) {
-      if (p.pii_enc) {
-        try {
-          const dec = decryptGuestPii(p.guest_id, p.pii_enc);
-          map.set(p.guest_id, {
-            name: dec.name,
-            serviceNumber: dec.serviceNumber,
-            unit: dec.unit,
-            phone: dec.phone,
-          });
-        } catch {
-          // ignore decryption error if session key mismatch
-        }
-      }
-    }
-    return map;
-  }, [piiRows]);
+  const getEffectiveBookingStatus = effectiveBookingStatus;
 
-  const guestNameOf = (g: any, idx: number) => {
-    const pii = piiMap.get(g?.id);
-    return g?.guest_name || pii?.name || (g?.guest_code ? `Guest (${g.guest_code})` : `Guest ${idx + 1}`);
-  };
-
-  const guestUnitOf = (g: any) => g?.unit || piiMap.get(g?.id)?.unit;
-  const guestServiceNoOf = (g: any) => g?.service_number || piiMap.get(g?.id)?.serviceNumber;
-
-  const getEffectiveBookingStatus = (b: any): string => {
-    if (!b) return 'PENDING_ALLOTMENT';
-    if (b.status === 'CANCELLED' || b.status === 'DISPLACED' || b.status === 'COMPLETED') {
-      return b.status;
-    }
-    if (b.status === 'PENDING_ALLOTMENT') {
-      return 'PENDING_ALLOTMENT';
-    }
-    const activeAllocs = (b.allocations || []).filter((a: any) => a.status === 'ACTIVE');
-    if (activeAllocs.length === 0) {
-      return 'PENDING_ALLOTMENT';
-    }
-    return 'CONFIRMED';
-  };
-
+  const today = localDateString();
   const [searchQuery, setSearchQuery] = useState('');
   const [searchQueryApplied, setSearchQueryApplied] = useState('');
-  const [searchResults, setSearchResults] = useState<string[] | null>(null);
-  const [isSearching, setIsSearching] = useState(false);
   const [categoryFilter, setCategoryFilter] = useState('ALL');
   const [statusFilter, setStatusFilter] = useState('ALL');
+  const [rankFilter, setRankFilter] = useState(ALL);
+  const [roomFilter, setRoomFilter] = useState(ALL);
+  const [dateFilterOn, setDateFilterOn] = useState(false);
+  const [dateFrom, setDateFrom] = useState(today);
+  const [dateTo, setDateTo] = useState(addDaysToDateString(today, 7));
   const [page, setPage] = useState(0);
-  const pageSize = 15;
 
-  // Handle universal search across any guest/booking parameter (Name, Unit, Service No, Phone, Guest ID, etc.)
-  const handleSearch = async () => {
-    const q = searchQuery.trim();
-    if (!q) {
-      setSearchResults(null);
-      setSearchQueryApplied('');
-      return;
+  // Typing searches as you go; Enter or the Search button applies it immediately.
+  useEffect(() => {
+    const timer = setTimeout(() => setSearchQueryApplied(searchQuery.trim()), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  const dateRangeValid = isValidDateString(dateFrom) && isValidDateString(dateTo) && dateTo >= dateFrom;
+  const dateFilterApplied = dateFilterOn && dateRangeValid;
+
+  // Anything beyond category and status is matched on the loaded bookings; category and status
+  // alone keep using the paged server query.
+  const clientMode =
+    Boolean(searchQueryApplied) || rankFilter !== ALL || roomFilter !== ALL || dateFilterApplied;
+  const anyFilter =
+    clientMode || Boolean(searchQuery.trim()) || categoryFilter !== 'ALL' || statusFilter !== 'ALL' || dateFilterOn;
+
+  const filterKey = [searchQueryApplied, categoryFilter, statusFilter, rankFilter, roomFilter, dateFilterApplied ? `${dateFrom}|${dateTo}` : ''].join('~');
+  useEffect(() => {
+    setPage(0);
+  }, [filterKey]);
+
+  useEffect(() => {
+    if (searchQueryApplied) {
+      // The query can be a name, phone number or ID: log only its length.
+      logAction('bookings.search', { meta: { query_length: searchQueryApplied.length } });
     }
-    setSearchError(null);
-    setIsSearching(true);
-    try {
-      const ids = new Set<string>();
+  }, [searchQueryApplied]);
 
-      // 1. Universal search RPC (matches guest_code, rank_code, category, booking id, name, unit, etc.)
-      const { data: rpcRows, error: rpcError } = await supabase.rpc('search_bookings_and_guests', {
-        p_query: q,
-      });
+  const handleSearch = () => setSearchQueryApplied(searchQuery.trim());
 
-      if (!rpcError && Array.isArray(rpcRows)) {
-        rpcRows.forEach((r: any) => {
-          if (r?.booking_id) ids.add(r.booking_id);
-        });
-      }
-
-      // 2. Direct query on booking_guests to guarantee matching by guest_name, unit, service_number, phone
-      try {
-        const { data: directGuests } = await supabase
-          .from('booking_guests')
-          .select('booking_id')
-          .or(`guest_name.ilike.%${q}%,unit.ilike.%${q}%,service_number.ilike.%${q}%,phone.ilike.%${q}%,guest_code.ilike.%${q}%,rank_code.ilike.%${q}%`);
-        if (directGuests) {
-          directGuests.forEach((g: any) => {
-            if (g?.booking_id) ids.add(g.booking_id);
-          });
-        }
-      } catch {
-        // Safe to ignore if table query restricted
-      }
-
-      // 3. Blind index exact match if session is unlocked (for optional Aadhaar/passport search)
-      try {
-        const blindIndex = computeIdBlindIndex(q);
-        const { data: blindRows } = await supabase.rpc('search_guests_by_blind_index', {
-          p_blind: blindIndex,
-        });
-        if (Array.isArray(blindRows)) {
-          blindRows.forEach((r: any) => {
-            if (r?.booking_id) ids.add(r.booking_id);
-          });
-        }
-      } catch {
-        // Safe to ignore if session key not unlocked or input not valid blind index
-      }
-
-      // 4. In-memory match against piiMap (so any decrypted guest matching name/unit/service number is found!)
-      if (piiMap.size > 0 && bookings) {
-        const lowerQ = q.toLowerCase();
-        for (const b of (bookings as any[])) {
-          const matched = (b.booking_guests || []).some((g: any) => {
-            const pii = piiMap.get(g?.id);
-            if (!pii) return false;
-            return (
-              (pii.name && pii.name.toLowerCase().includes(lowerQ)) ||
-              (pii.unit && pii.unit.toLowerCase().includes(lowerQ)) ||
-              (pii.serviceNumber && pii.serviceNumber.toLowerCase().includes(lowerQ)) ||
-              (pii.phone && pii.phone.toLowerCase().includes(lowerQ))
-            );
-          });
-          if (matched) ids.add(b.id);
-        }
-      }
-
-      logAction('bookings.search', {
-        // The query can be a name, phone number or ID: log only its length.
-        meta: { query_length: q.length, results: ids.size },
-      });
-
-      setPage(0);
-      setSearchQueryApplied(q);
-      setSearchResults([...ids]);
-    } catch (err: any) {
-      setSearchError(userErrorMessage(err, 'Search failed.'));
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  const handleClearSearch = () => {
+  const handleClearFilters = () => {
     setSearchQuery('');
     setSearchQueryApplied('');
-    setSearchResults(null);
-    setSearchError(null);
+    setCategoryFilter('ALL');
+    setStatusFilter('ALL');
+    setRankFilter(ALL);
+    setRoomFilter(ALL);
+    setDateFilterOn(false);
     setPage(0);
   };
 
-  // Fetch bookings list
-  const { data: bookings, isLoading, refetch } = useQuery({
-    queryKey: ['bookings_ledger', categoryFilter, statusFilter, searchResults, page],
-    queryFn: async () => {
-      if (searchResults && searchResults.length === 0) return [];
-
+  // Server-paged list: used while only category/status are chosen.
+  const {
+    data: listRows,
+    isLoading: listLoading,
+  } = useQuery({
+    queryKey: ['bookings_ledger', 'list', categoryFilter, statusFilter, page],
+    enabled: !clientMode,
+    placeholderData: (previous) => previous,
+    queryFn: async (): Promise<LedgerBooking[]> => {
       // "Pending allotment" includes confirmed bookings that hold no bed, which no single server
       // filter can express. Fetch that bounded set and page it here, so every page is full and
       // the Next button never hides rows.
       if (statusFilter === 'PENDING_ALLOTMENT') {
+        // (fetchPendingAllotment adds the allocations itself.)
         let list = await fetchPendingAllotment<any>('*, booking_guests(*)');
         if (categoryFilter !== 'ALL') list = list.filter((b: any) => b.category === categoryFilter);
-        if (searchResults) list = list.filter((b: any) => searchResults.includes(b.id));
-        return list.slice(page * pageSize, (page + 1) * pageSize);
+        return list.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
       }
 
       // CONFIRMED means "has an active bed": an inner join on ACTIVE allocations filters on the
@@ -239,7 +207,7 @@ export default function BookingsLedgerScreen() {
           { count: 'exact' },
         )
         .order('created_at', { ascending: false })
-        .range(page * pageSize, (page + 1) * pageSize - 1);
+        .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1);
 
       if (categoryFilter !== 'ALL') {
         query = query.eq('category', categoryFilter);
@@ -249,20 +217,100 @@ export default function BookingsLedgerScreen() {
       } else if (statusFilter !== 'ALL') {
         query = query.eq('status', statusFilter);
       }
-      if (searchResults) {
-        query = query.in('id', searchResults);
-      }
 
       const { data, error } = await query;
       if (error) throw error;
-      return data || [];
+      return (data || []) as LedgerBooking[];
     },
   });
 
+  // Search / rank / room / date filters: the bookings are loaded once and matched here.
+  const {
+    data: corpus,
+    isLoading: corpusLoading,
+    error: corpusError,
+  } = useQuery({
+    queryKey: ['bookings_ledger', 'corpus'],
+    enabled: clientMode,
+    queryFn: fetchSearchCorpus,
+  });
+
+  const { data: serverHits } = useQuery({
+    queryKey: ['bookings_ledger', 'server_hits', searchQueryApplied],
+    enabled: Boolean(searchQueryApplied),
+    queryFn: () => fetchServerHits(searchQueryApplied),
+    staleTime: 30_000,
+  });
+
+  // Server matches older than the loaded window (only possible with a very long history).
+  const missingHitIds = useMemo(() => {
+    if (!corpus || !serverHits) return [];
+    const have = new Set(corpus.map((b) => b.id));
+    return serverHits.filter((id) => !have.has(id)).slice(0, 100);
+  }, [corpus, serverHits]);
+
+  const { data: olderHits } = useQuery({
+    queryKey: ['bookings_ledger', 'older_hits', missingHitIds.join(',')],
+    enabled: missingHitIds.length > 0,
+    queryFn: async (): Promise<LedgerBooking[]> => {
+      const { data, error } = await supabase.from('bookings').select(LEDGER_SELECT).in('id', missingHitIds);
+      if (error) throw error;
+      return (data ?? []) as LedgerBooking[];
+    },
+  });
+
+  const filters: BookingFilters = useMemo(
+    () => ({
+      text: searchQueryApplied,
+      category: categoryFilter,
+      status: statusFilter,
+      rank: rankFilter,
+      roomId: roomFilter,
+      dateFrom: dateFilterApplied ? dateFrom : undefined,
+      dateTo: dateFilterApplied ? dateTo : undefined,
+    }),
+    [searchQueryApplied, categoryFilter, statusFilter, rankFilter, roomFilter, dateFilterApplied, dateFrom, dateTo],
+  );
+
+  const matches = useMemo<LedgerBooking[] | null>(() => {
+    if (!clientMode || !corpus) return null;
+    const pool = olderHits?.length
+      ? [...corpus, ...olderHits].sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')))
+      : corpus;
+    return filterBookings(pool, filters, {
+      roomNames,
+      serverHitIds: serverHits ? new Set(serverHits) : null,
+    });
+  }, [clientMode, corpus, olderHits, filters, roomNames, serverHits]);
+
+  const bookings: LedgerBooking[] = clientMode
+    ? (matches ?? []).slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+    : (listRows ?? []);
+  const isLoading = clientMode ? corpusLoading : listLoading;
+  const hasNextPage = clientMode ? (page + 1) * PAGE_SIZE < (matches?.length ?? 0) : (listRows?.length ?? 0) >= PAGE_SIZE;
+  const searchError = clientMode && corpusError ? userErrorMessage(corpusError, 'Search failed.') : null;
+
+  const rankOptions = useMemo(
+    () => [
+      { label: 'All ranks', value: ALL },
+      ...[...RANKS].reverse().map((r) => ({ label: r.label, value: r.code as string })),
+      { label: 'Civilian companions', value: 'CIVILIAN' },
+    ],
+    [],
+  );
+
+  const roomOptions = useMemo(() => {
+    const named = Object.entries(roomNames ?? {})
+      .filter(([, name]) => name && name !== 'Locked' && name !== 'Decryption Error')
+      .sort((a, b) => a[1].localeCompare(b[1], undefined, { numeric: true }))
+      .map(([id, name]) => ({ label: name, value: id }));
+    return [{ label: 'All rooms', value: ALL }, ...named];
+  }, [roomNames]);
+
   useFocusEffect(
     useCallback(() => {
-      refetch();
-    }, [refetch])
+      queryClient.invalidateQueries({ queryKey: ['bookings_ledger'] });
+    }, [queryClient]),
   );
 
   const handleAllot = (item: any) => {
@@ -272,10 +320,15 @@ export default function BookingsLedgerScreen() {
       checkIn: item.check_in,
       checkOut: item.check_out,
       preferredRoomType: item.preferred_room_type || undefined,
-      guests: (item.booking_guests || []).map((g: any, i: number) => ({
+      guests: sortedGuests(item).map((g: any) => ({
         gender: g.gender || 'M',
-        rankCode: g.rank_code || 'CAPT',
-        name: guestNameOf(g, i),
+        rankCode: g.rank_code ?? null,
+        relation: g.relation ?? undefined,
+        // Only real names travel on; the "Guest (GST-…)" stand-in must never be saved as a name.
+        name: realGuestName(g.guest_name) || undefined,
+        serviceNumber: guestServiceNumber(g) || undefined,
+        unit: guestUnit(g) || undefined,
+        phone: guestPhone(g) || undefined,
       })),
     });
     router.push({
@@ -295,35 +348,23 @@ export default function BookingsLedgerScreen() {
     },
     {
       key: 'guest',
-      header: 'Guest Name & Rank',
-      width: 220,
+      header: 'Guest Name, Rank & Unit',
+      width: 300,
       render: (item: any) => {
-        const guests = item.booking_guests || [];
+        const guests = sortedGuests(item);
         if (!guests.length) return <Text style={[styles.cellText, { color: colors.muted }]}>—</Text>;
         return (
-          <View style={{ gap: 4 }}>
-            {guests.map((g: any, i: number) => {
-              const name = guestNameOf(g, i);
-              const unit = guestUnitOf(g);
-              const sNo = guestServiceNoOf(g);
-              return (
-                <View key={g.id || i} style={{ gap: 1 }}>
-                  <Text style={[styles.cellText, { fontWeight: '700', color: colors.navy }]}>
-                    {name}
-                  </Text>
-                  <Text style={{ fontSize: 11, color: colors.muted }}>
-                    {[
-                      g.rank_code,
-                      unit,
-                      sNo && `No: ${sNo}`,
-                      g.guest_code && `[${g.guest_code}]`,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </Text>
-                </View>
-              );
-            })}
+          <View style={{ gap: 6 }}>
+            {guests.map((g: any, i: number) => (
+              <View key={g.id || i} style={{ gap: 1 }}>
+                <Text style={[styles.cellText, { fontWeight: '700', color: colors.navy }]}>
+                  {guestName(g, null, i)}
+                </Text>
+                <Text style={{ fontSize: 12, color: colors.muted }}>
+                  {guestDetailLine(g, null, { includeCode: true })}
+                </Text>
+              </View>
+            ))}
           </View>
         );
       },
@@ -445,45 +486,79 @@ export default function BookingsLedgerScreen() {
           </View>
         </View>
 
+        <View style={styles.filterRow}>
+          <View style={{ flex: 1 }}>
+            <Select
+              label="Filter Rank"
+              value={rankFilter}
+              onChange={setRankFilter}
+              options={rankOptions}
+              variant="dropdown"
+            />
+          </View>
+
+          <View style={{ flex: 1 }}>
+            <Select
+              label="Filter Room"
+              value={roomFilter}
+              onChange={setRoomFilter}
+              options={roomOptions}
+              variant="dropdown"
+            />
+          </View>
+        </View>
+
+        <Checkbox
+          label="Only stays on these dates"
+          hint="Shows bookings whose stay overlaps the dates, including check-in and check-out days."
+          checked={dateFilterOn}
+          onChange={setDateFilterOn}
+        />
+        {dateFilterOn ? (
+          <View style={{ marginTop: spacing.sm }}>
+            <DateRange
+              startDate={dateFrom}
+              endDate={dateTo}
+              onStartDateChange={setDateFrom}
+              onEndDateChange={setDateTo}
+              startLabel="Stay from"
+              endLabel="Stay to"
+              inclusive
+              hideNights
+            />
+          </View>
+        ) : null}
+
         <View style={styles.searchRow}>
           <View style={{ flex: 1 }}>
             <Field
               label="Search Bookings & Guests"
               value={searchQuery}
               onChangeText={setSearchQuery}
-              placeholder="Search by Guest ID (e.g. GST-1001), Rank, Name, Phone, Service No, Category..."
+              placeholder="Name, rank, unit, service no, phone, guest ID, room, date..."
               returnKeyType="search"
               onSubmitEditing={handleSearch}
-              hint="Search across any parameter: Unique Guest ID, military rank, category, booking ID, or personal details."
+              hint='Results update as you type. Try a name, "Flight Lieutenant", a unit, a service number, a phone number, GST-1053, a room name, "pending", "2026-10-18" or "3 guests".'
             />
           </View>
-          <Button
-            label={isSearching ? 'Searching…' : 'Search'}
-            variant="secondary"
-            disabled={isSearching}
-            onPress={handleSearch}
-            style={{ marginTop: 26 }}
-          />
-          {searchResults !== null && (
-            <Button
-              label="Clear"
-              variant="destructive"
-              onPress={handleClearSearch}
-              style={{ marginTop: 26 }}
-            />
-          )}
+          <Button label="Search" variant="secondary" onPress={handleSearch} style={{ marginTop: 26 }} />
+          {anyFilter ? (
+            <Button label="Clear filters" variant="destructive" onPress={handleClearFilters} style={{ marginTop: 26 }} />
+          ) : null}
         </View>
         {searchError && <Banner type="error" message={searchError} />}
-        {searchResults !== null && (
+        {clientMode && matches ? (
           <Banner
-            type={searchResults.length === 0 ? 'warning' : 'info'}
+            type={matches.length === 0 ? 'warning' : 'info'}
             message={
-              searchResults.length === 0
-                ? `No bookings or guests match "${searchQueryApplied}".`
-                : `Showing ${searchResults.length} booking${searchResults.length > 1 ? 's' : ''} matching "${searchQueryApplied}".`
+              matches.length === 0
+                ? searchQueryApplied
+                  ? `No bookings match "${searchQueryApplied}" with the selected filters.`
+                  : 'No bookings match the selected filters.'
+                : `Showing ${page * PAGE_SIZE + 1}-${Math.min((page + 1) * PAGE_SIZE, matches.length)} of ${matches.length} booking${matches.length === 1 ? '' : 's'}${searchQueryApplied ? ` matching "${searchQueryApplied}"` : ''}.`
             }
           />
-        )}
+        ) : null}
       </Card>
 
       {useCards ? (
@@ -513,27 +588,22 @@ export default function BookingsLedgerScreen() {
                 </Text>
 
                 <View style={{ marginVertical: spacing.xs, gap: 4 }}>
-                  {(item.booking_guests || []).map((g: any, i: number) => {
-                    const name = guestNameOf(g, i);
-                    const unit = guestUnitOf(g);
-                    const sNo = guestServiceNoOf(g);
-                    return (
-                      <View key={g.id || i} style={{ gap: 2 }}>
-                        <Text style={{ fontWeight: '800', color: colors.navy, fontSize: typography.sm }}>
-                          {name} ({g.rank_code})
-                        </Text>
-                        <Text style={{ fontSize: 12, color: colors.muted }}>
-                          {[
-                            unit && `Unit: ${unit}`,
-                            sNo && `No: ${sNo}`,
-                            g.guest_code && `[${g.guest_code}]`,
-                          ]
-                            .filter(Boolean)
-                            .join(' · ')}
-                        </Text>
-                      </View>
-                    );
-                  })}
+                  {sortedGuests(item).map((g: any, i: number) => (
+                    <View key={g.id || i} style={{ gap: 2 }}>
+                      <Text style={{ fontWeight: '800', color: colors.navy, fontSize: typography.sm }}>
+                        {guestRankedName(g, null, i)}
+                      </Text>
+                      <Text style={{ fontSize: 12, color: colors.muted }}>
+                        {[
+                          guestUnit(g) && `Unit: ${guestUnit(g)}`,
+                          guestServiceNumber(g) && `No: ${guestServiceNumber(g)}`,
+                          g.guest_code && `[${g.guest_code}]`,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </Text>
+                    </View>
+                  ))}
                   <Text style={[styles.cellText, { color: colors.text, marginTop: 2, fontWeight: '600' }]}>
                     Room: {roomsOf(item)}
                   </Text>
@@ -578,7 +648,7 @@ export default function BookingsLedgerScreen() {
         <Button
           label="Next Page →"
           variant="secondary"
-          disabled={(bookings?.length || 0) < pageSize}
+          disabled={!hasNextPage}
           onPress={() => setPage(page + 1)}
         />
       </View>

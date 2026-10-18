@@ -107,6 +107,8 @@ export interface CreateBookingInput {
   guests: GuestDemand[];
   preferredRoomType?: RoomType;
   isSuiteBooking?: boolean;
+  /** "Allow room sharing"; false when left out. */
+  allowSharing?: boolean;
 }
 
 export const CreateBookingRequestSchema: SchemaValidator<CreateBookingInput> = {
@@ -185,7 +187,8 @@ export const CreateBookingRequestSchema: SchemaValidator<CreateBookingInput> = {
         partySize,
         guests: val.guests as GuestDemand[],
         preferredRoomType: (val.preferredRoomType as RoomType) || undefined,
-        isSuiteBooking: Boolean(val.isSuiteBooking)
+        isSuiteBooking: Boolean(val.isSuiteBooking),
+        allowSharing: Boolean(val.allowSharing)
       }
     };
   }

@@ -47,6 +47,11 @@ export interface Booking {
   stay: string; // daterange
   partySize: number;
   isSuiteBooking: boolean;
+  /**
+   * Room sharing. TRUE: the booking accepts other bookings beside it (and may itself be placed
+   * beside them). FALSE: the booking holds each room it uses for its own party only.
+   */
+  allowSharing: boolean;
   notesEnc?: string | null;
   keyVersion: number;
   createdBy: string;
@@ -138,6 +143,12 @@ export interface RoomDayOccupant {
   bookingStatus: BookingStatus;
   checkIn: string;
   checkOut: string;
+  /**
+   * Whether this occupant's booking lets other bookings use the room's other bed. A booking that
+   * does not allow it holds the whole room. Missing (a server that predates room sharing) counts
+   * as true.
+   */
+  allowSharing?: boolean;
 }
 
 export interface RoomDayState {
@@ -166,10 +177,17 @@ export interface BookingPlanRequest {
   preferredRoomType?: RoomType;
   isSuiteBooking?: boolean;
   /**
+   * "Allow room sharing" on the booking. false (the default): only fully unoccupied rooms are
+   * offered, and the booking then holds each room it uses for its own party. true: fully empty
+   * rooms plus rooms with a free bed beside an occupant it may share with (same gender for
+   * ranked guests, any rank; civilians never share across bookings) whose own booking allows
+   * sharing too.
+   */
+  allowSharing?: boolean;
+  /**
    * Offer beds in already-shared rooms first: a lone guest is seated beside a compatible
-   * occupant (same gender and rank; civilians never share across bookings) before any empty
-   * room is opened. Applies across room
-   * types; the preferred type then only orders the remaining choices.
+   * occupant before any empty room is opened. Only meaningful with allowSharing. Applies across
+   * room types; the preferred type then only orders the remaining choices.
    */
   preferSharing?: boolean;
 }

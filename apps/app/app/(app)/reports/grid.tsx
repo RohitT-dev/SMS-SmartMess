@@ -31,6 +31,9 @@ import {
   type GridPdfOccupant,
   type GridPdfRoom,
 } from '../../../src/features/reports/gridPdfGenerator';
+import { isRoomHeldExclusive, occupantLines } from '../../../src/features/reports/gridHtml';
+import { enrichDayStates, idsKey, occupantBookingIds } from '../../../src/features/reports/gridGuests';
+import { fetchGridGuests } from '../../../src/features/reports/reportData';
 
 interface CellModalData {
   roomId: string;
@@ -38,6 +41,8 @@ interface CellModalData {
   roomType: string;
   date: string;
   isClosed: boolean;
+  /** One occupant whose booking does not allow sharing: the room has no free second bed. */
+  isHeld: boolean;
   occupants: GridPdfOccupant[];
 }
 
@@ -124,6 +129,18 @@ export default function RoomOccupancyGridScreen() {
 
   const queryClient = useQueryClient();
 
+  // daily_room_state returns guest codes only; attach names, full ranks, units and service numbers.
+  const bookingIds = useMemo(() => occupantBookingIds(dayStates), [dayStates]);
+  const { data: guestData } = useQuery({
+    queryKey: ['grid_guests', idsKey(bookingIds)],
+    enabled: bookingIds.length > 0,
+    queryFn: () => fetchGridGuests(bookingIds),
+  });
+  const richDayStates = useMemo(
+    () => enrichDayStates(dayStates || [], guestData?.guests ?? [], guestData?.pii),
+    [dayStates, guestData],
+  );
+
   // Auto-refresh when grid screen is focused
   useFocusEffect(
     useCallback(() => {
@@ -146,6 +163,9 @@ export default function RoomOccupancyGridScreen() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, () => {
         refetchDayStates();
         queryClient.invalidateQueries({ queryKey: ['daily_room_state_grid'] });
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'booking_guests' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['grid_guests'] });
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, () => {
         refetchRooms();
@@ -176,11 +196,11 @@ export default function RoomOccupancyGridScreen() {
   // Map state by `${date}_${room_id}`
   const stateLookup = useMemo(() => {
     const map = new Map<string, GridPdfDayState>();
-    (dayStates || []).forEach((st) => {
+    richDayStates.forEach((st) => {
       map.set(`${st.date}_${st.room_id}`, st);
     });
     return map;
-  }, [dayStates]);
+  }, [richDayStates]);
 
   // Prepared rooms with decrypted names
   const preparedRooms: GridPdfRoom[] = useMemo(() => {
@@ -202,8 +222,7 @@ export default function RoomOccupancyGridScreen() {
         fromDate,
         toDate: toDateInclusive,
         rooms: preparedRooms,
-        dayStates,
-        messName: 'Residential Officers Mess',
+        dayStates: richDayStates,
       });
     } catch (err: any) {
       setExportError(err?.message ?? 'Failed to export PDF');
@@ -240,7 +259,7 @@ export default function RoomOccupancyGridScreen() {
           </View>
           <View style={styles.pdfButtonContainer}>
             <Button
-              label={isExporting ? 'Generating PDF…' : 'Download PDF (Print)'}
+              label={isExporting ? 'Preparing…' : 'Preview / PDF'}
               variant="primary"
               disabled={isExporting || isLoading || !rangeValid}
               onPress={handleDownloadPdf}
@@ -360,6 +379,7 @@ export default function RoomOccupancyGridScreen() {
                         const st = stateLookup.get(`${dateStr}_${room.id}`);
                         const isClosed = st?.is_closed ?? false;
                         const occupants = st?.occupants ?? [];
+                        const isHeld = st ? isRoomHeldExclusive(st) : false;
 
                         let cellBg = STAY_COLORS.VACANT.bg;
                         let cellBorder = STAY_COLORS.VACANT.border;
@@ -398,6 +418,7 @@ export default function RoomOccupancyGridScreen() {
                                 roomType: room.roomType,
                                 date: dateStr,
                                 isClosed,
+                                isHeld,
                                 occupants,
                               });
                             }}
@@ -423,25 +444,35 @@ export default function RoomOccupancyGridScreen() {
                                           ? STAY_COLORS.PI
                                           : STAY_COLORS.MFA;
 
+                                  const lines = occupantLines(occ);
                                   return (
                                     <View
                                       key={occ.allocationId || i}
+                                      // @ts-expect-error `title` is a react-native-web hover tooltip, not a native prop
+                                      title={[lines.name, lines.detail, lines.service].filter(Boolean).join(' | ')}
                                       style={[
                                         styles.cellBadge,
                                         { backgroundColor: colorDef.bg, borderColor: colorDef.border },
                                       ]}
                                     >
-                                      <Text style={[styles.cellBadgeText, { color: colorDef.text }]} numberOfLines={1}>
-                                        {cat} {occ.guestCode ? `• ${occ.guestCode}` : ''}
+                                      <Text style={[styles.cellBadgeText, { color: colorDef.text }]}>
+                                        {lines.name}
                                       </Text>
-                                      {occ.rankCode && (
-                                        <Text style={[styles.cellSubRank, { color: colorDef.darkText }]} numberOfLines={1}>
-                                          {occ.rankCode}
+                                      {lines.detail ? (
+                                        <Text style={[styles.cellSubRank, { color: colorDef.darkText }]}>
+                                          {lines.detail}
                                         </Text>
-                                      )}
+                                      ) : null}
                                     </View>
                                   );
                                 })}
+                                {isHeld && (
+                                  <View style={[styles.cellBadge, styles.heldBadge, { borderColor: STAY_COLORS.CLOSED.border }]}>
+                                    <Text style={[styles.cellSubRank, { color: STAY_COLORS.CLOSED.text }]}>
+                                      No sharing - room held
+                                    </Text>
+                                  </View>
+                                )}
                               </View>
                             )}
                           </Pressable>
@@ -506,18 +537,32 @@ export default function RoomOccupancyGridScreen() {
                   />
                 ) : (
                   <View style={{ gap: spacing.sm }}>
-                    {modalData.occupants.map((occ, idx) => (
+                    {modalData.isHeld && (
+                      <Banner
+                        type="warning"
+                        message="This booking does not allow room sharing. The room is held for its party, so there is no free second bed."
+                      />
+                    )}
+                    {modalData.occupants.map((occ, idx) => {
+                      const lines = occupantLines(occ);
+                      return (
                       <View
                         key={occ.allocationId || idx}
                         style={[styles.occupantCard, { borderColor: colors.border, backgroundColor: colors.bg }]}
                       >
                         <View style={styles.occupantHeader}>
-                          <View>
-                            <Text style={[styles.occGuestCode, { color: colors.blue }]}>
-                              Unique Guest ID: {occ.guestCode || 'GST-…'}
-                            </Text>
+                          <View style={{ flex: 1 }}>
+                            <Text style={[styles.occName, { color: colors.navy }]}>{lines.name}</Text>
                             <Text style={[styles.occRank, { color: colors.navy }]}>
-                              Rank: {occ.rankCode ?? '—'} • Bed Slot #{occ.bedSlot ?? 1}
+                              {[lines.rank, occ.unit]
+                                .filter(Boolean)
+                                .join(' • ') || 'Rank not recorded'}
+                            </Text>
+                            {lines.service ? (
+                              <Text style={[styles.occDates, { color: colors.muted }]}>{lines.service}</Text>
+                            ) : null}
+                            <Text style={[styles.occGuestCode, { color: colors.blue }]}>
+                              Guest ID {occ.guestCode || 'not assigned'} • Bed {occ.bedSlot ?? 1}
                             </Text>
                           </View>
                           <Badge
@@ -547,13 +592,14 @@ export default function RoomOccupancyGridScreen() {
                           />
                         )}
                       </View>
-                    ))}
+                      );
+                    })}
                   </View>
                 )}
               </View>
 
               <View style={styles.modalActions}>
-                {!modalData.isClosed && modalData.occupants.length < 2 && (
+                {!modalData.isClosed && !modalData.isHeld && modalData.occupants.length < 2 && (
                   <Button
                     label={
                       modalData.occupants.length === 0
@@ -692,7 +738,7 @@ const styles = StyleSheet.create({
     fontWeight: typography.weights.bold,
   },
   roomHeaderCell: {
-    width: 120,
+    width: 150,
     height: 48,
     borderWidth: 1,
     justifyContent: 'center',
@@ -710,7 +756,7 @@ const styles = StyleSheet.create({
   },
   dateCell: {
     width: 110,
-    height: 52,
+    minHeight: 56,
     borderWidth: 1,
     justifyContent: 'center',
     paddingHorizontal: 8,
@@ -724,8 +770,8 @@ const styles = StyleSheet.create({
     fontSize: 10,
   },
   gridCell: {
-    width: 120,
-    height: 52,
+    width: 150,
+    minHeight: 56,
     borderWidth: 1,
     justifyContent: 'center',
     alignItems: 'center',
@@ -802,6 +848,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
+  },
+  occName: {
+    fontSize: typography.sm,
+    fontWeight: typography.weights.bold,
+  },
+  heldBadge: {
+    borderStyle: 'dashed',
+    backgroundColor: '#F7FAFC',
   },
   occGuestCode: {
     fontSize: typography.xs,
