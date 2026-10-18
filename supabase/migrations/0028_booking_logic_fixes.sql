@@ -20,6 +20,7 @@
 --  6. eviction_candidates(): skips offline / deleted / closed rooms.
 --  7. record_denial() can resolve the pending request it denies (p_booking_id).
 --  8. The room-closure trigger no longer blocks shortening a stay in a room that went offline.
+--  9. delete_room() and end_room_closure() use mess_today() as well.
 
 -- ---------------------------------------------------------------------------
 -- 1. mess_today()
@@ -121,10 +122,14 @@ BEGIN
     RAISE EXCEPTION 'ERR_NOT_FOUND' USING errcode = 'P0001';
   END IF;
 
+  -- A CONFIRMED booking with no active bed is only allottable while its stay is still running or
+  -- ahead (never a finished stay); clerks also cannot start one in the past.
   IF NOT (
     v_booking.status = 'PENDING_ALLOTMENT'
     OR (
       v_booking.status = 'CONFIRMED'
+      AND v_booking.check_out > public.mess_today()
+      AND (public.is_admin() OR v_booking.check_in >= public.mess_today())
       AND NOT EXISTS (
         SELECT 1 FROM public.allocations a
         WHERE a.booking_id = p_booking_id AND a.status = 'ACTIVE'
@@ -754,6 +759,10 @@ BEGIN
   -- Who is coming in. An existing pending request is allotted in place (its stored category and
   -- dates rule, not the payload's); otherwise a new booking is created below.
   IF v_existing_id IS NOT NULL THEN
+    -- Seating an existing request is an allotment: it needs the allotment permission too.
+    IF NOT (public.has_perm('create_booking') OR public.is_admin()) THEN
+      RAISE EXCEPTION 'ERR_PERMISSION' USING errcode = 'P0001';
+    END IF;
     SELECT * INTO v_existing FROM public.bookings WHERE id = v_existing_id FOR UPDATE;
     IF NOT FOUND THEN
       RAISE EXCEPTION 'ERR_NOT_FOUND' USING errcode = 'P0001';
@@ -867,6 +876,18 @@ BEGIN
     END IF;
   END IF;
 
+  -- Caller-supplied seating may only use the beds this eviction just freed.
+  IF EXISTS (
+    SELECT 1 FROM jsonb_array_elements(v_allocations) al
+    WHERE NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements(v_beds) fb
+      WHERE fb->>'room_id' = al->>'room_id'
+        AND (fb->>'bed_slot')::INT = (al->>'bed_slot')::INT
+    )
+  ) THEN
+    RAISE EXCEPTION 'ERR_CANNOT_EVICT: incoming guests may only be seated on the freed beds' USING errcode = 'P0001';
+  END IF;
+
   -- 3. Seat the incoming party on the freed beds
   IF v_existing_id IS NOT NULL THEN
     PERFORM public.internal_allot_booking(v_existing_id, v_allocations);
@@ -946,6 +967,7 @@ BEGIN
       v_booking.status = 'PENDING_ALLOTMENT'
       OR (
         v_booking.status = 'CONFIRMED'
+        AND v_booking.check_out > public.mess_today()
         AND NOT EXISTS (
           SELECT 1 FROM public.allocations a
           WHERE a.booking_id = p_booking_id AND a.status = 'ACTIVE'
@@ -954,6 +976,14 @@ BEGIN
     ) THEN
       RAISE EXCEPTION 'ERR_BOOKING_NOT_PENDING' USING errcode = 'P0001';
     END IF;
+    -- Suites are an admin matter, as everywhere else.
+    IF v_booking.is_suite_booking AND NOT public.is_admin() THEN
+      RAISE EXCEPTION 'ERR_SUITE_ONLY_ADMIN' USING errcode = 'P0001';
+    END IF;
+    -- The denial describes the stored request, not whatever the caller typed.
+    p_check_in := v_booking.check_in;
+    p_check_out := v_booking.check_out;
+    p_party_size := v_booking.party_size;
   END IF;
 
   INSERT INTO public.denials (
@@ -982,3 +1012,104 @@ END;
 $$;
 
 GRANT EXECUTE ON FUNCTION public.record_denial(public.category, DATE, DATE, INT, TEXT, INT, UUID, UUID) TO authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 9. Remaining CURRENT_DATE users: room deletion and ending a closure use the mess's day too
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.delete_room(p_room_id UUID)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_room public.rooms%ROWTYPE;
+  v_today DATE := public.mess_today();
+BEGIN
+  IF NOT (public.is_active_user() AND public.is_aal2() AND (public.has_perm('manage_rooms') OR public.is_admin())) THEN
+    RAISE EXCEPTION 'ERR_PERMISSION' USING errcode = 'P0001';
+  END IF;
+
+  SELECT * INTO v_room FROM public.rooms WHERE id = p_room_id FOR UPDATE;
+  IF NOT FOUND OR v_room.deleted_at IS NOT NULL THEN
+    RAISE EXCEPTION 'ERR_NOT_FOUND' USING errcode = 'P0001';
+  END IF;
+
+  IF v_room.room_type = 'SUITE' AND NOT public.is_admin() THEN
+    RAISE EXCEPTION 'ERR_SUITE_ONLY_ADMIN' USING errcode = 'P0001';
+  END IF;
+
+  -- Safety check: ensure room has no active allocations that extend today or into the future
+  IF EXISTS (
+    SELECT 1 FROM public.allocations a
+    WHERE a.room_id = p_room_id
+      AND a.status = 'ACTIVE'
+      AND upper(a.stay) > v_today
+  ) THEN
+    RAISE EXCEPTION 'ERR_ROOM_HAS_ACTIVE_BOOKINGS' USING errcode = 'P0001';
+  END IF;
+
+  -- Perform soft deletion
+  UPDATE public.rooms
+  SET is_active = FALSE,
+      deleted_at = NOW(),
+      updated_at = NOW()
+  WHERE id = p_room_id;
+
+  -- Remove upcoming/future closures for this room
+  DELETE FROM public.room_closures
+  WHERE room_id = p_room_id AND lower(period) >= v_today;
+
+  -- Terminate any ongoing closure at today
+  UPDATE public.room_closures
+  SET period = daterange(lower(period), v_today, '[)')
+  WHERE room_id = p_room_id AND lower(period) < v_today AND upper(period) > v_today;
+
+  PERFORM public.log_audit_event('room_deleted', 'rooms', p_room_id, jsonb_build_object('room_type', v_room.room_type));
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.delete_room(UUID) TO authenticated;
+
+CREATE OR REPLACE FUNCTION public.end_room_closure(p_closure_id UUID)
+RETURNS VOID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_closure public.room_closures%ROWTYPE;
+  v_today DATE := public.mess_today();
+BEGIN
+  IF NOT (public.is_active_user() AND public.is_aal2() AND public.has_perm('manage_rooms')) THEN
+    RAISE EXCEPTION 'ERR_PERMISSION' USING errcode = 'P0001';
+  END IF;
+
+  SELECT * INTO v_closure FROM public.room_closures WHERE id = p_closure_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'ERR_NOT_FOUND' USING errcode = 'P0001';
+  END IF;
+
+  IF NOT public.is_admin() AND EXISTS (
+    SELECT 1 FROM public.rooms r WHERE r.id = v_closure.room_id AND r.room_type = 'SUITE'
+  ) THEN
+    RAISE EXCEPTION 'ERR_SUITE_ONLY_ADMIN' USING errcode = 'P0001';
+  END IF;
+
+  IF lower(v_closure.period) >= v_today THEN
+    -- Not started yet: remove it entirely.
+    DELETE FROM public.room_closures WHERE id = p_closure_id;
+  ELSIF upper(v_closure.period) > v_today THEN
+    -- In progress: the room is available again from today.
+    UPDATE public.room_closures
+    SET period = daterange(lower(v_closure.period), v_today, '[)')
+    WHERE id = p_closure_id;
+  END IF;
+  -- Already finished: nothing to do.
+
+  PERFORM public.log_audit_event('room_closure_ended', 'room_closures', p_closure_id,
+    jsonb_build_object('room_id', v_closure.room_id));
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.end_room_closure(UUID) TO authenticated;

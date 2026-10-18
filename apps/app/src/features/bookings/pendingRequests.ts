@@ -10,7 +10,7 @@ interface WithAllocations {
 
 /**
  * Bookings still waiting for room allotment: requests in PENDING_ALLOTMENT, plus CONFIRMED
- * bookings whose stay has not ended and that hold no ACTIVE bed (nothing to show for them
+ * bookings whose stay has not ended (check-out after today) and that hold no ACTIVE bed (nothing to show for them
  * otherwise). Two narrow queries instead of "every booking ever made", so the list stays
  * complete as history grows (a single unfiltered select is cut off at the API row limit).
  *
@@ -25,7 +25,7 @@ export async function fetchPendingAllotment<T extends WithAllocations>(columns: 
       .from('bookings')
       .select(select)
       .eq('status', 'CONFIRMED')
-      .gte('check_out', localDateString()),
+      .gt('check_out', localDateString()),
   ]);
   if (pending.error) throw pending.error;
   if (unseated.error) throw unseated.error;

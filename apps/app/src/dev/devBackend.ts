@@ -431,7 +431,10 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     const b = bookingById(bookingId);
     if (!b) throw new PgError('ERR_NOT_FOUND');
     const unseated =
-      b.status === 'CONFIRMED' && !db.allocations.some((al) => al.booking_id === b.id && al.status === 'ACTIVE');
+      b.status === 'CONFIRMED' &&
+      b.check_out > messToday() &&
+      (isAdmin() || b.check_in >= messToday()) &&
+      !db.allocations.some((al) => al.booking_id === b.id && al.status === 'ACTIVE');
     if (b.status !== 'PENDING_ALLOTMENT' && !unseated) throw new PgError('ERR_BOOKING_NOT_PENDING');
     if (b.is_suite_booking && !isAdmin()) throw new PgError('ERR_SUITE_ONLY_ADMIN');
     if (!allocations || allocations.length === 0) throw new PgError('ERR_EMPTY_ALLOCATIONS');
@@ -867,6 +870,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       let allocs: Row[] | undefined = inc.allocations;
 
       // An existing pending request is allotted in place; its stored category and dates rule.
+      if (booking?.booking_id && !(hasPerm('create_booking') || isAdmin())) throw new PgError('ERR_PERMISSION');
       const existing = booking?.booking_id ? bookingById(booking.booking_id) : undefined;
       if (booking?.booking_id && !existing) throw new PgError('ERR_NOT_FOUND');
       if (existing?.is_suite_booking) throw new PgError('ERR_CANNOT_EVICT: a suite booking cannot displace other guests');
@@ -918,6 +922,9 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
         }
         allocs = seqs.map((seq, i) => ({ guest_seq: seq, room_id: beds[i].room_id, bed_slot: beds[i].bed_slot }));
       }
+      if (allocs.some((al) => !beds.some((bd) => bd.room_id === al.room_id && bd.bed_slot === Number(al.bed_slot)))) {
+        throw new PgError('ERR_CANNOT_EVICT: incoming guests may only be seated on the freed beds');
+      }
       let newId: string;
       if (existing) {
         internalAllot(existing.id, allocs);
@@ -954,8 +961,12 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
         if (pending.category !== a.p_category) throw new PgError('ERR_CANNOT_DENY_PRIORITY');
         const unseated =
           pending.status === 'CONFIRMED' &&
+          pending.check_out > messToday() &&
           !db.allocations.some((al) => al.booking_id === pending!.id && al.status === 'ACTIVE');
         if (pending.status !== 'PENDING_ALLOTMENT' && !unseated) throw new PgError('ERR_BOOKING_NOT_PENDING');
+        if (pending.is_suite_booking && !isAdmin()) throw new PgError('ERR_SUITE_ONLY_ADMIN');
+        // The denial describes the stored request, not the caller's typed values.
+        a = { ...a, p_check_in: pending.check_in, p_check_out: pending.check_out, p_party_size: pending.party_size };
       }
       const id = a.p_id ?? randomUUID();
       if (pending) {

@@ -2018,4 +2018,36 @@ describe('booking logic review fixes', () => {
     });
     expect(again.error?.message).toContain('ERR_BOOKING_NOT_PENDING');
   });
+
+  it('eviction refuses to seat the incoming party on beds that were not freed', async () => {
+    await fillAllRooms(d(0), d(2), 'LEAVE');
+    const pendingId = await requestFor([G('M', 'AVM')], 'MFA');
+    const { data: cands } = await sb.rpc('eviction_candidates', {
+      p_category: 'MFA', p_check_in: d(0), p_check_out: d(2), p_guests: [{ seq: 1, gender: 'M', rank_code: 'AVM' }],
+    });
+    const other = cands.find((c: any) => c.room_id !== cands[0].room_id);
+    const res = await sb.rpc('approve_eviction', {
+      p_incoming: {
+        booking_id: pendingId, category: 'MFA', check_in: d(0), check_out: d(2), party_size: 1, guests: [],
+        allocations: [{ guest_seq: 1, room_id: other.room_id, bed_slot: other.bed_slot }],
+      },
+      p_evict_allocation_ids: [cands[0].allocation_id],
+      p_reason_enc: 'enc:official-duty-reason',
+      p_key_version: 1,
+      p_reason_aad_id: crypto.randomUUID(),
+    });
+    expect(res.error?.message).toContain('freed beds');
+    expect((await sb.from('bookings').select('*').eq('id', pendingId).single()).data.status).toBe('PENDING_ALLOTMENT');
+  });
+
+  it('a denial records the stored request\'s dates and party size, not the caller\'s', async () => {
+    const id = await requestFor([G('M', 'FO'), G('M', 'FO')], 'LEAVE', d(3), d(5));
+    const res = await sb.rpc('record_denial', {
+      p_category: 'LEAVE', p_check_in: d(0), p_check_out: d(1), p_party_size: 1, p_reason_enc: 'enc', p_key_version: 1,
+      p_id: crypto.randomUUID(), p_booking_id: id,
+    });
+    expect(res.error, res.error?.message).toBeNull();
+    const row = ((await sb.from('denials').select('*')).data as any[]).find((r) => r.id === res.data);
+    expect([row.check_in, row.check_out, row.party_size]).toEqual([d(3), d(5), 2]);
+  });
 });
