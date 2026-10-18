@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { View, Text, StyleSheet, Pressable } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useThemeStore } from '../../../../src/state/themeStore';
 import { useSessionStore } from '../../../../src/state/sessionStore';
 import { Screen } from '../../../../src/ui/primitives/Screen';
@@ -30,12 +30,14 @@ import {
   type EvictionCandidate,
   type SharingPerson,
 } from '@sms/core';
-import { guestRowsPayload } from '../../../../src/features/bookings/planBooking';
+import { guestRowsPayload, seatPartyOnBeds, type FreedBed } from '../../../../src/features/bookings/planBooking';
 
 /** Stand-in booking id for the incoming party, which has no id until it is created. */
 const INCOMING = 'incoming';
 
 interface ParsedPayload {
+  /** The pending request being resolved; absent for a party that has no booking yet. */
+  bookingId?: string;
   category: Category;
   checkIn: string;
   checkOut: string;
@@ -47,6 +49,7 @@ export default function EvictionReviewScreen() {
   const router = useRouter();
   const colors = useThemeStore((s) => s.colors);
   const { userRole, userPermissions } = useSessionStore();
+  const queryClient = useQueryClient();
 
   const canApprove = userRole === 'admin' || userPermissions.includes('approve_eviction');
 
@@ -56,7 +59,8 @@ export default function EvictionReviewScreen() {
   } catch {
     parsed = null;
   }
-  const { category, checkIn, checkOut, guests } = parsed || {
+  const { bookingId, category, checkIn, checkOut, guests } = parsed || {
+    bookingId: undefined,
     category: 'MFA' as Category,
     checkIn: '',
     checkOut: '',
@@ -132,20 +136,33 @@ export default function EvictionReviewScreen() {
     return out;
   }, [states]);
 
-  // The server seats incoming guest N in the Nth selected bed.
+  // Selected beds in selection order, and who sits where. Pairs that belong together (couples,
+  // same gender and rank, a ranked guest and a civilian of the party) go into one room.
+  const selectedBeds: FreedBed[] = useMemo(
+    () =>
+      selectedAllocationIds
+        .map((id) => candidates.find((c) => c.allocationId === id))
+        .filter((c): c is EvictionCandidate => !!c)
+        .map((c) => ({ allocationId: c.allocationId, roomId: c.roomId, bedSlot: c.bedSlot as 1 | 2 })),
+    [selectedAllocationIds, candidates],
+  );
+  const seating = useMemo(() => seatPartyOnBeds(guests, selectedBeds), [guests, selectedBeds]);
+  const guestForAllocation = useMemo(() => {
+    const map = new Map<string, number>();
+    seating?.forEach((s) => map.set(s.bed.allocationId, s.guestIndex));
+    return map;
+  }, [seating]);
+
   const seatingProblems = useMemo(() => {
     const problems: string[] = [];
-    const selected = selectedAllocationIds
-      .map((id) => candidates.find((c) => c.allocationId === id))
-      .filter((c): c is EvictionCandidate => !!c);
-    if (selected.length > 0 && selected.length < guests.length) {
+    if (selectedBeds.length > 0 && selectedBeds.length < guests.length) {
       problems.push(
-        `Select at least ${guests.length} bed${guests.length > 1 ? 's' : ''}: one for each incoming guest (${selected.length} selected).`,
+        `Select at least ${guests.length} bed${guests.length > 1 ? 's' : ''}: one for each incoming guest (${selectedBeds.length} selected).`,
       );
     }
     const seatedByRoom: Record<string, Array<GuestDemand & { idx: number }>> = {};
-    selected.slice(0, guests.length).forEach((cand, idx) => {
-      (seatedByRoom[cand.roomId] ??= []).push({ idx, ...guests[idx] });
+    (seating ?? []).forEach(({ guestIndex, bed }) => {
+      (seatedByRoom[bed.roomId] ??= []).push({ idx: guestIndex, ...guests[guestIndex] });
     });
     for (const [roomId, seated] of Object.entries(seatedByRoom)) {
       const roomLabel = candidates.find((c) => c.roomId === roomId)?.roomCode ?? 'room';
@@ -155,7 +172,7 @@ export default function EvictionReviewScreen() {
       const incoming: SharingPerson[] = seated.map((x) => ({
         gender: x.gender,
         rankCode: x.rankCode,
-        bookingId: INCOMING,
+        bookingId: bookingId ?? INCOMING,
       }));
       const clashesWithStayer = stayers.some((st) => incoming.some((p) => !canShareRoom(p, st)));
       const clashesWithinParty = incoming.some((p, i) => incoming.slice(i + 1).some((q) => !canShareRoom(p, q)));
@@ -170,7 +187,7 @@ export default function EvictionReviewScreen() {
       }
     }
     return problems;
-  }, [selectedAllocationIds, candidates, guests, remainingByRoom]);
+  }, [selectedBeds, seating, candidates, guests, remainingByRoom, selectedAllocationIds, bookingId]);
 
   const toggleSelectAllocation = (id: string) => {
     if (selectedAllocationIds.includes(id)) {
@@ -184,7 +201,7 @@ export default function EvictionReviewScreen() {
   const isTypedConfirmValid = typedConfirmation.trim() === 'CONFIRM EVICTION';
 
   const handleApproveEviction = async () => {
-    if (!isReasonValid || !isTypedConfirmValid || selectedAllocationIds.length === 0) return;
+    if (!isReasonValid || !isTypedConfirmValid || selectedAllocationIds.length === 0 || !seating) return;
     setApproving(true);
     setErrorMessage(null);
 
@@ -194,11 +211,18 @@ export default function EvictionReviewScreen() {
 
       const { data: incomingBookingId, error } = await supabase.rpc('approve_eviction', {
         p_incoming: {
+          // An existing pending request is allotted in place rather than booked a second time.
+          booking_id: bookingId ?? null,
           category,
           check_in: checkIn,
           check_out: checkOut,
           party_size: guests.length,
-          guests: guestRowsPayload(guests),
+          guests: bookingId ? [] : guestRowsPayload(guests),
+          allocations: (seating ?? []).map((s) => ({
+            guest_seq: s.guestIndex + 1,
+            room_id: s.bed.roomId,
+            bed_slot: s.bed.bedSlot,
+          })),
         },
         p_evict_allocation_ids: selectedAllocationIds,
         p_reason_enc: reasonEnc,
@@ -214,6 +238,10 @@ export default function EvictionReviewScreen() {
       });
 
       setShowConfirmDialog(false);
+      queryClient.invalidateQueries({ queryKey: ['pending_booking_requests'] });
+      queryClient.invalidateQueries({ queryKey: ['tabbar_pending_requests_count'] });
+      queryClient.invalidateQueries({ queryKey: ['bookings_ledger'] });
+      queryClient.invalidateQueries({ queryKey: ['daily_room_state'] });
       router.replace(`/(app)/bookings/${incomingBookingId}/confirmed` as any);
     } catch (err: any) {
       setErrorMessage(userErrorMessage(err, 'Eviction approval failed'));
@@ -243,7 +271,7 @@ export default function EvictionReviewScreen() {
             DISPLACEMENT CANDIDATES ({candidates.length} bed{candidates.length === 1 ? '' : 's'})
           </Text>
           <Text style={[styles.subtitle, { color: colors.muted }]}>
-            Tap beds to displace. The first selected bed goes to guest 1, the second to guest 2, and so on.
+            Tap beds to displace. Guests who belong together (couples, same gender and rank) are seated in one room when both its beds are selected.
             MFA can displace PI/LEAVE/TD; PI can displace LEAVE/TD. Suites are excluded.
           </Text>
 
@@ -256,7 +284,6 @@ export default function EvictionReviewScreen() {
           ) : (
             candidates.map((cand) => {
               const isSelected = selectedAllocationIds.includes(cand.allocationId);
-              const seatIdx = selectedAllocationIds.indexOf(cand.allocationId);
               const roommate = (remainingByRoom[cand.roomId] ?? []).find(
                 (r) => r.allocationId !== cand.allocationId,
               );
@@ -284,8 +311,8 @@ export default function EvictionReviewScreen() {
                     <Badge
                       label={
                         isSelected
-                          ? seatIdx < guests.length
-                            ? `EVICT → GUEST ${seatIdx + 1}`
+                          ? guestForAllocation.has(cand.allocationId)
+                            ? `EVICT → GUEST ${guestForAllocation.get(cand.allocationId)! + 1}`
                             : 'EVICT (BED LEFT EMPTY)'
                           : 'SELECT'
                       }
@@ -327,7 +354,7 @@ export default function EvictionReviewScreen() {
             variant="destructive"
             disabled={
               !canApprove ||
-              selectedAllocationIds.length < guests.length ||
+              !seating ||
               seatingProblems.length > 0
             }
             onPress={() => setShowConfirmDialog(true)}

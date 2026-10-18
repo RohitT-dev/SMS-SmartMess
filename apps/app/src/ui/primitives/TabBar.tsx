@@ -8,7 +8,7 @@ import { NAV_ITEMS, isNavActive } from '../navigation';
 import { Icon, IconName } from './Icon';
 
 import { useQuery } from '@tanstack/react-query';
-import { supabase } from '../../lib/supabase';
+import { fetchPendingAllotment } from '../../features/bookings/pendingRequests';
 
 interface TabItem {
   label: string;
@@ -38,18 +38,14 @@ export const TabBar: React.FC = () => {
   const { data: pendingCount } = useQuery({
     queryKey: ['tabbar_pending_requests_count'],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('bookings')
-        .select('id, status, allocations(status)')
-        .not('status', 'in', '("CANCELLED","DISPLACED","COMPLETED")');
-      if (error) return 0;
-      const unallotted = (data || []).filter((b: any) => {
-        if (b.status === 'CANCELLED' || b.status === 'DISPLACED' || b.status === 'COMPLETED') return false;
-        if (b.status === 'PENDING_ALLOTMENT') return true;
-        const activeAllocs = (b.allocations || []).filter((a: any) => a.status === 'ACTIVE');
-        return activeAllocs.length === 0;
-      });
-      return unallotted.length;
+      try {
+        const pending = await fetchPendingAllotment<{ id: string; status: string; allocations: Array<{ status: string }> }>(
+          'id, status',
+        );
+        return pending.length;
+      } catch {
+        return 0;
+      }
     },
     refetchInterval: 5000,
   });

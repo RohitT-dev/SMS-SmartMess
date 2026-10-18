@@ -18,6 +18,7 @@ import {
   decryptGuestPii,
 } from '../../../src/features/crypto-session/cryptoSession';
 import { useRoomNames } from '../../../src/features/rooms/useRoomNames';
+import { fetchPendingAllotment } from '../../../src/features/bookings/pendingRequests';
 import { userErrorMessage } from '../../../src/lib/userError';
 import { Banner } from '../../../src/ui/primitives/Banner';
 import { humanizeStatus } from '../../../src/lib/labels';
@@ -214,35 +215,47 @@ export default function BookingsLedgerScreen() {
   const { data: bookings, isLoading, refetch } = useQuery({
     queryKey: ['bookings_ledger', categoryFilter, statusFilter, searchResults, page],
     queryFn: async () => {
+      if (searchResults && searchResults.length === 0) return [];
+
+      // "Pending allotment" includes confirmed bookings that hold no bed, which no single server
+      // filter can express. Fetch that bounded set and page it here, so every page is full and
+      // the Next button never hides rows.
+      if (statusFilter === 'PENDING_ALLOTMENT') {
+        let list = await fetchPendingAllotment<any>('*, booking_guests(*)');
+        if (categoryFilter !== 'ALL') list = list.filter((b: any) => b.category === categoryFilter);
+        if (searchResults) list = list.filter((b: any) => searchResults.includes(b.id));
+        return list.slice(page * pageSize, (page + 1) * pageSize);
+      }
+
+      // CONFIRMED means "has an active bed": an inner join on ACTIVE allocations filters on the
+      // server, so pagination counts only matching rows.
+      const confirmedOnly = statusFilter === 'CONFIRMED';
       let query = supabase
         .from('bookings')
-        .select('*, booking_guests(*), allocations(*, rooms(*))', { count: 'exact' })
+        .select(
+          confirmedOnly
+            ? '*, booking_guests(*), allocations!inner(*, rooms(*))'
+            : '*, booking_guests(*), allocations(*, rooms(*))',
+          { count: 'exact' },
+        )
         .order('created_at', { ascending: false })
         .range(page * pageSize, (page + 1) * pageSize - 1);
 
       if (categoryFilter !== 'ALL') {
         query = query.eq('category', categoryFilter);
       }
-      if (statusFilter === 'PENDING_ALLOTMENT') {
-        query = query.not('status', 'in', '("CANCELLED","DISPLACED","COMPLETED")');
+      if (confirmedOnly) {
+        query = query.eq('status', 'CONFIRMED').eq('allocations.status', 'ACTIVE');
       } else if (statusFilter !== 'ALL') {
         query = query.eq('status', statusFilter);
       }
-      if (searchResults && searchResults.length > 0) {
+      if (searchResults) {
         query = query.in('id', searchResults);
-      } else if (searchResults && searchResults.length === 0) {
-        return [];
       }
 
       const { data, error } = await query;
       if (error) throw error;
-      let list = data || [];
-      if (statusFilter === 'PENDING_ALLOTMENT') {
-        list = list.filter((b: any) => getEffectiveBookingStatus(b) === 'PENDING_ALLOTMENT');
-      } else if (statusFilter === 'CONFIRMED') {
-        list = list.filter((b: any) => getEffectiveBookingStatus(b) === 'CONFIRMED');
-      }
-      return list;
+      return data || [];
     },
   });
 

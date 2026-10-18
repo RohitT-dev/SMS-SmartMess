@@ -139,9 +139,21 @@ interface RoomIntervalSummary {
   // Over the entire interval:
   bed1Free: boolean;
   bed2Free: boolean;
-  // Occupant in the other bed if exactly one bed is taken throughout the interval
-  bed1Occupant?: SharingPerson;
-  bed2Occupant?: SharingPerson;
+  // Everyone who sleeps in each bed on any day of the interval (a bed can change hands mid-stay,
+  // and a newcomer must be compatible with all of them).
+  bed1Occupants: SharingPerson[];
+  bed2Occupants: SharingPerson[];
+}
+
+function addOccupant(list: SharingPerson[], person: SharingPerson): void {
+  const same = (o: SharingPerson) =>
+    o.gender === person.gender && o.rankCode === person.rankCode && o.bookingId === person.bookingId;
+  if (!list.some(same)) list.push(person);
+}
+
+/** True when `person` may share a room with every occupant of the other bed. */
+function compatibleWithAll(occupants: SharingPerson[], person: SharingPerson): boolean {
+  return occupants.length > 0 && occupants.every((o) => canShareRoom(o, person));
 }
 
 function summarizeRoomsForInterval(
@@ -161,7 +173,9 @@ function summarizeRoomsForInterval(
         displayOrder: s.displayOrder,
         isClosed: false,
         bed1Free: true,
-        bed2Free: true
+        bed2Free: true,
+        bed1Occupants: [],
+        bed2Occupants: []
       };
       roomMap.set(s.roomId, summary);
     }
@@ -182,11 +196,11 @@ function summarizeRoomsForInterval(
     for (const occ of s.occupants) {
       if (occ.bedSlot === 1) {
         summary.bed1Free = false;
-        summary.bed1Occupant = { gender: occ.gender, rankCode: occ.rankCode, bookingId: occ.bookingId };
+        addOccupant(summary.bed1Occupants, { gender: occ.gender, rankCode: occ.rankCode, bookingId: occ.bookingId });
       }
       if (occ.bedSlot === 2) {
         summary.bed2Free = false;
-        summary.bed2Occupant = { gender: occ.gender, rankCode: occ.rankCode, bookingId: occ.bookingId };
+        addOccupant(summary.bed2Occupants, { gender: occ.gender, rankCode: occ.rankCode, bookingId: occ.bookingId });
       }
     }
   }
@@ -289,7 +303,11 @@ function tryAssignRooms(
   preferSharing = false
 ): PlannedAssignment[] | null {
   const assignments: PlannedAssignment[] = [];
-  const roomPool = availableRooms.map((r) => ({ ...r }));
+  const roomPool = availableRooms.map((r) => ({
+    ...r,
+    bed1Occupants: [...r.bed1Occupants],
+    bed2Occupants: [...r.bed2Occupants]
+  }));
 
   // 1. Assign pairs to whole free rooms (bed 1 and bed 2 free)
   for (const [p1, p2] of pairs) {
@@ -311,8 +329,8 @@ function tryAssignRooms(
   // when whole rooms run out. With preferSharing the order flips: shared beds first.
   const findShared = (s: GuestDemand) =>
     roomPool.findIndex((r) => {
-      if (r.bed1Free && !r.bed2Free && r.bed2Occupant) return canShareRoom(r.bed2Occupant, s);
-      if (r.bed2Free && !r.bed1Free && r.bed1Occupant) return canShareRoom(r.bed1Occupant, s);
+      if (r.bed1Free && !r.bed2Free) return compatibleWithAll(r.bed2Occupants, s);
+      if (r.bed2Free && !r.bed1Free) return compatibleWithAll(r.bed1Occupants, s);
       return false;
     });
   const findWhole = () => roomPool.findIndex((r) => r.bed1Free && r.bed2Free);
@@ -328,7 +346,7 @@ function tryAssignRooms(
     const r = roomPool[idx];
     r.bed1Free = false;
     // Record the lone occupant so bed 2 stays open to a compatible guest.
-    r.bed1Occupant = { gender: s.gender, rankCode: s.rankCode };
+    r.bed1Occupants.push({ gender: s.gender, rankCode: s.rankCode });
     assignments.push({ guestIndex: s.guestIndex, roomId: r.roomId, roomType: r.roomType, bedSlot: 1 });
   };
 

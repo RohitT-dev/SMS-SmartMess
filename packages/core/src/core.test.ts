@@ -52,6 +52,47 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
     assert.strictEqual(roomStatus({ ...baseState, isClosed: true }), 'out_of_service');
   });
 
+  it('A bed that changes hands mid-stay must suit every occupant, not just the last one', () => {
+    const day = (n: number) => `2030-01-0${n}`;
+    const occ = (rank: 'FO' | 'WG_CDR', booking: string) => ({
+      allocationId: `${booking}-1`,
+      bookingId: booking,
+      bedSlot: 1 as const,
+      gender: 'M' as const,
+      rankCode: rank,
+      category: 'LEAVE' as const,
+      bookingStatus: 'CONFIRMED' as const,
+      checkIn: day(1),
+      checkOut: day(5),
+    });
+    const state = (date: string, o: ReturnType<typeof occ>): RoomDayState => ({
+      roomId: 'R1',
+      roomType: 'NORMAL',
+      displayOrder: 1,
+      date,
+      bedsTaken: 1,
+      isClosed: false,
+      occupants: [o],
+    });
+    // Bed 1: WG_CDR on nights 1-2, FO on nights 3-4. Bed 2 is free throughout.
+    const states = [
+      state(day(1), occ('WG_CDR', 'a')),
+      state(day(2), occ('WG_CDR', 'a')),
+      state(day(3), occ('FO', 'b')),
+      state(day(4), occ('FO', 'b')),
+    ];
+    const plan = planAllotment(
+      {
+        category: 'LEAVE',
+        checkIn: day(1),
+        checkOut: day(5),
+        guests: [{ gender: 'M', rankCode: 'FO', relation: 'PRIMARY' }],
+      } as BookingPlanRequest,
+      states,
+    );
+    assert.notStrictEqual(plan.kind, 'ALLOT');
+  });
+
   it('Eviction eligibility matrix (all priority combinations)', () => {
     // MFA can displace PI, LEAVE, TD
     assert.strictEqual(canDisplace('MFA', 'PI'), true);

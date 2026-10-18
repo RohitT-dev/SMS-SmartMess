@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useThemeStore } from '../../../../src/state/themeStore';
 import { Screen } from '../../../../src/ui/primitives/Screen';
 import { Card } from '../../../../src/ui/primitives/Card';
@@ -17,18 +18,19 @@ import {
   encryptReason,
   getActiveKeyVersion,
 } from '../../../../src/features/crypto-session/cryptoSession';
-import type { Category, GuestDemand } from '@sms/core';
+import { fetchRoomDayStates } from '../../../../src/features/bookings/roomState';
+import { alternatesHorizonEnd } from '../../../../src/features/bookings/planBooking';
+import { findAlternateWindows, type Category, type GuestDemand, type RoomType } from '@sms/core';
 
 interface ParsedPayload {
+  /** The pending request being resolved; absent for a party that has no booking yet. */
+  bookingId?: string;
   category: Category;
   checkIn: string;
   checkOut: string;
   guests: GuestDemand[];
+  preferredRoomType?: RoomType;
   preferSharing?: boolean;
-  plan?: {
-    kind: string;
-    windows?: Array<{ checkIn: string; checkOut: string; roomsFree: number }>;
-  };
 }
 
 export default function BookingAlternatesScreen() {
@@ -42,15 +44,32 @@ export default function BookingAlternatesScreen() {
   } catch {
     parsed = null;
   }
-  const { category, checkIn, checkOut, guests, plan, preferSharing } = parsed || {
+  const { bookingId, category, checkIn, checkOut, guests, preferredRoomType, preferSharing } = parsed || {
+    bookingId: undefined,
     category: 'LEAVE' as Category,
     checkIn: '',
     checkOut: '',
-    guests: [],
-    plan: { kind: 'NONE', windows: [] },
+    guests: [] as GuestDemand[],
+    preferredRoomType: undefined,
+    preferSharing: undefined,
   };
+  const queryClient = useQueryClient();
 
-  const windows = plan?.windows || [];
+  // The alternate-window search needs room state up to 90 days past the requested check-out.
+  const { data: horizonStates, isLoading: loadingWindows } = useQuery({
+    queryKey: ['daily_room_state_alternates', checkIn, checkOut],
+    queryFn: () => fetchRoomDayStates(checkIn, alternatesHorizonEnd(checkOut)),
+    enabled: Boolean(checkIn && checkOut && guests.length > 0),
+  });
+
+  const windows = useMemo(
+    () =>
+      horizonStates
+        ? findAlternateWindows({ category, checkIn, checkOut, guests, preferredRoomType, preferSharing }, horizonStates)
+        : [],
+    [horizonStates, category, checkIn, checkOut, guests, preferredRoomType, preferSharing],
+  );
+  const [movingTo, setMovingTo] = useState<string | null>(null);
   const isPriority = category === 'MFA' || category === 'PI';
 
   // Denial state
@@ -59,11 +78,47 @@ export default function BookingAlternatesScreen() {
   const [denying, setDenying] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  const handleSelectWindow = async (newCheckIn: string, newCheckOut: string) => {
+    setErrorMessage(null);
+    if (!bookingId) {
+      // No request saved yet: back to the intake form with the new dates.
+      router.replace({
+        pathname: '/(app)/bookings/new',
+        params: { checkIn: newCheckIn, checkOut: newCheckOut },
+      } as any);
+      return;
+    }
+    setMovingTo(newCheckIn);
+    try {
+      const { error } = await supabase.rpc('update_booking_dates', {
+        p_booking_id: bookingId,
+        p_new_check_in: newCheckIn,
+        p_new_check_out: newCheckOut,
+      });
+      if (error) throw error;
+      logAction('bookings.update_dates', {
+        entity: 'bookings',
+        entityId: bookingId,
+        meta: { old_check_in: checkIn, old_check_out: checkOut, new_check_in: newCheckIn, new_check_out: newCheckOut, via: 'alternates' },
+      });
+      queryClient.invalidateQueries({ queryKey: ['pending_booking_requests'] });
+      queryClient.invalidateQueries({ queryKey: ['booking_record', bookingId] });
+      queryClient.invalidateQueries({ queryKey: ['bookings_ledger'] });
+      // The request now sits on the free window; the booking record offers the allotment.
+      router.replace(`/(app)/bookings/${bookingId}` as any);
+    } catch (err: unknown) {
+      setErrorMessage(userErrorMessage(err, 'Could not move the request to those dates'));
+    } finally {
+      setMovingTo(null);
+    }
+  };
+
   const handleOpenEviction = () => {
     router.push({
       pathname: '/(app)/bookings/new/eviction',
       params: {
         payload: JSON.stringify({
+          bookingId,
           category,
           checkIn,
           checkOut,
@@ -89,6 +144,7 @@ export default function BookingAlternatesScreen() {
         p_reason_enc: reasonEnc,
         p_key_version: getActiveKeyVersion(),
         p_id: denialId,
+        p_booking_id: bookingId ?? null,
       });
 
       if (error) throw error;
@@ -97,6 +153,9 @@ export default function BookingAlternatesScreen() {
         entityId: denialId,
         meta: { category, party_size: guests.length },
       });
+      queryClient.invalidateQueries({ queryKey: ['pending_booking_requests'] });
+      queryClient.invalidateQueries({ queryKey: ['tabbar_pending_requests_count'] });
+      queryClient.invalidateQueries({ queryKey: ['bookings_ledger'] });
       setShowDenyDialog(false);
       setDenyReason('');
       router.replace('/(app)' as any);
@@ -119,10 +178,12 @@ export default function BookingAlternatesScreen() {
         <Card style={{ marginTop: spacing.md }}>
           <Text style={[styles.sectionTitle, { color: colors.navy }]}>Next available dates</Text>
           <Text style={[styles.subtitle, { color: colors.muted }]}>
-            Same length of stay, scanned up to 90 days ahead. Tap one to go back to the booking form with those dates.
+            Same length of stay, scanned up to 90 days ahead. Pick one to move this request to those dates.
           </Text>
 
-          {windows.length === 0 ? (
+          {loadingWindows ? (
+            <Text style={[styles.emptyText, { color: colors.muted }]}>Searching the next 90 days…</Text>
+          ) : windows.length === 0 ? (
             <Text style={[styles.emptyText, { color: colors.muted }]}>
               No continuous alternate windows found in the next 90 days.
             </Text>
@@ -138,19 +199,11 @@ export default function BookingAlternatesScreen() {
                   </Text>
                 </View>
                 <Button
-                  label="Select Dates"
+                  label={bookingId ? 'Move Request Here' : 'Select Dates'}
                   variant="secondary"
-                  onPress={() => {
-                    // Back to the form with the same party and category, only the dates changed.
-                    router.replace({
-                      pathname: '/(app)/bookings/new',
-                      params: {
-                        initialCheckIn: w.checkIn,
-                        initialCheckOut: w.checkOut,
-                        draft: JSON.stringify({ category, guests, preferSharing }),
-                      },
-                    } as any);
-                  }}
+                  loading={movingTo === w.checkIn}
+                  disabled={movingTo !== null}
+                  onPress={() => handleSelectWindow(w.checkIn, w.checkOut)}
                 />
               </View>
             ))

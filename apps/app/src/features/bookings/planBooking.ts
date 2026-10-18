@@ -1,4 +1,4 @@
-import { guestRelation, type GuestDemand } from '@sms/core';
+import { guestRelation, pairParty, type GuestDemand } from '@sms/core';
 import { addDaysToDateString } from '../../lib/dates';
 
 /** findAlternateWindows() scans this many days ahead of the requested check-in. */
@@ -35,4 +35,50 @@ export function guestRowsPayload(
     unit: g.unit || null,
     phone: g.phone || null,
   }));
+}
+
+export interface FreedBed {
+  /** The evicted allocation this bed came from. */
+  allocationId: string;
+  roomId: string;
+  bedSlot: 1 | 2;
+}
+
+export interface SeatedGuest {
+  guestIndex: number;
+  bed: FreedBed;
+}
+
+/**
+ * Seats an incoming party on the beds an eviction frees. People who belong in one room (a primary
+ * and spouse, two ranked guests of the same gender and rank, a ranked guest and a civilian of the
+ * party) are put into a room whose two beds are both freed; only when no such room is left are
+ * they split. Returns null when there are fewer beds than guests.
+ */
+export function seatPartyOnBeds(guests: GuestDemand[], beds: FreedBed[]): SeatedGuest[] | null {
+  if (beds.length < guests.length) return null;
+  const remaining = [...beds];
+  const seated: SeatedGuest[] = [];
+  const take = (guestIndex: number, bed: FreedBed) => {
+    remaining.splice(remaining.indexOf(bed), 1);
+    seated.push({ guestIndex, bed });
+  };
+
+  const { pairs, singles } = pairParty(guests);
+  const loose = [...singles];
+  for (const [a, b] of pairs) {
+    const byRoom = new Map<string, FreedBed[]>();
+    for (const bed of remaining) byRoom.set(bed.roomId, [...(byRoom.get(bed.roomId) ?? []), bed]);
+    const wholeRoom = [...byRoom.values()].find((list) => list.length >= 2);
+    if (wholeRoom) {
+      take(a.guestIndex, wholeRoom[0]);
+      take(b.guestIndex, wholeRoom[1]);
+    } else {
+      loose.push(a, b);
+    }
+  }
+  loose.sort((x, y) => x.guestIndex - y.guestIndex);
+  for (const g of loose) take(g.guestIndex, remaining[0]);
+
+  return seated.sort((x, y) => x.guestIndex - y.guestIndex);
 }

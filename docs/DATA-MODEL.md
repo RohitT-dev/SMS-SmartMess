@@ -106,14 +106,16 @@ Physical bed assignments.
 
 | RPC Name | Access Control | Description |
 |---|---|---|
-| `create_booking` | `create_booking` | Transactional booking, guests, and allocations allotment. |
-| `cancel_booking` | `cancel_booking` | Releases active allocations, sets status to `CANCELLED`. |
+| `create_booking` | `create_booking` | Transactional booking, guests, and allocations allotment. Every guest must get exactly one bed (`ERR_INCOMPLETE_ALLOTMENT`); a pending request cannot carry beds. |
+| `allot_booking_rooms` | `create_booking` | All-or-nothing allotment of a pending request (or a confirmed booking with no active bed). |
+| `cancel_booking` | `cancel_booking` | Releases active allocations, sets status to `CANCELLED`. Only `CONFIRMED` / `PENDING_ALLOTMENT` bookings (`ERR_BOOKING_NOT_ACTIVE`). |
 | `move_allocation` | `create_booking` | Reassigns bed or room with trigger validation. |
 | `get_guest_pii` | `reveal_guest_pii` | Audits "guest PII revealed", returns ciphertext blob. |
 | `set_guest_pii` | `enter_guest_details` | Stores encrypted PII & blind index; sets details `COMPLETE`. |
 | `search_guests_by_blind_index` | `reveal_guest_pii` | Audits blind search, returns matching booking IDs. |
-| `approve_eviction` | `approve_eviction` | Atomic displacement of existing booking and creation of incoming booking. |
-| `record_denial` | `deny_request` | Records denial reason. Blocks `MFA`/`PI` with `ERR_CANNOT_DENY_PRIORITY`. |
+| `approve_eviction` | `approve_eviction` | Atomic displacement of occupied, non-suite beds that overlap the incoming stay; allots the pending request in place (`booking_id`) or creates the incoming booking. |
+| `record_denial` | `deny_request` | Records denial reason and, with `p_booking_id`, cancels the pending request. Blocks `MFA`/`PI` with `ERR_CANNOT_DENY_PRIORITY`. |
+| `mess_today` | internal | "Today" in the mess time zone (`app_config.mess_timezone`, default `Asia/Kolkata`); used for backdating and stay-started rules instead of the UTC `CURRENT_DATE`. |
 | `verify_audit_chain` | `admin` | Cryptographically verifies the unbroken SHA-256 chain. |
 | `daily_room_state` | `is_active_user` | Aggregates room and bed state by date. Filters suites for non-admins. |
 | `dashboard_counts` | `is_active_user` | Live counts of free rooms, partial occupancy, and pending actions. |
