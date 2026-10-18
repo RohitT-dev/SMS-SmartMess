@@ -56,6 +56,7 @@ AS $$
 DECLARE
   v_new_gender public.gender;
   v_new_rank public.rank_code;
+  v_new_booking UUID;
   v_mismatch_exists BOOLEAN;
 BEGIN
   IF NEW.status <> 'ACTIVE' THEN
@@ -65,9 +66,14 @@ BEGIN
   -- Row-level lock on the room to prevent race conditions during concurrent bookings
   PERFORM 1 FROM public.rooms WHERE id = NEW.room_id FOR UPDATE;
 
-  SELECT gender, rank_code INTO v_new_gender, v_new_rank
+  SELECT gender, rank_code, booking_id INTO v_new_gender, v_new_rank, v_new_booking
   FROM public.booking_guests
   WHERE id = NEW.guest_id;
+
+  -- The allocation's guest must belong to the allocation's booking
+  IF v_new_booking IS DISTINCT FROM NEW.booking_id THEN
+    RAISE EXCEPTION 'ERR_SHARE_RULE' USING errcode = 'P0001';
+  END IF;
 
   SELECT EXISTS (
     SELECT 1
@@ -79,7 +85,7 @@ BEGIN
       AND a.stay && NEW.stay
       AND NOT (
         -- same party, and at least one of the two is a civilian
-        (a.booking_id = NEW.booking_id AND (bg.rank_code IS NULL OR v_new_rank IS NULL))
+        (bg.booking_id = v_new_booking AND (bg.rank_code IS NULL OR v_new_rank IS NULL))
         -- two ranked people of the same gender and rank
         OR (bg.rank_code IS NOT NULL AND v_new_rank IS NOT NULL
             AND bg.gender = v_new_gender AND bg.rank_code = v_new_rank)
@@ -212,6 +218,10 @@ BEGIN
     v_guest_id := (v_guest_map->>(v_alloc->>'guest_seq'))::UUID;
     IF v_guest_id IS NULL AND (v_alloc->>'guest_id') IS NOT NULL THEN
       v_guest_id := (v_alloc->>'guest_id')::UUID;
+      IF NOT EXISTS (SELECT 1 FROM public.booking_guests
+                     WHERE id = v_guest_id AND booking_id = v_booking_id) THEN
+        RAISE EXCEPTION 'ERR_INVALID_GUEST' USING errcode = 'P0001';
+      END IF;
     END IF;
 
     INSERT INTO public.allocations (
