@@ -14,13 +14,16 @@ import { EmptyState } from '../../src/ui/primitives/EmptyState';
 import { spacing, typography } from '../../src/ui/tokens';
 import { supabase } from '../../src/lib/supabase';
 import { useRoomNames } from '../../src/features/rooms/useRoomNames';
+import { RoomBedMap } from '../../src/features/rooms/RoomBedMap';
+import { Segmented } from '../../src/ui/primitives/Segmented';
+import { Button } from '../../src/ui/primitives/Button';
 import { addDaysToDateString, localDateString } from '../../src/lib/dates';
 import type { RoomAvailabilityStatus } from '@sms/core';
 
 interface TileOccupant {
   category: string;
   gender: string;
-  rankCode: string;
+  rankCode: string | null;
 }
 
 /** "LEAVE · M/FO ×2" when both beds hold the same profile, otherwise one entry per guest. */
@@ -28,7 +31,7 @@ function summarizeOccupants(occupants: TileOccupant[] | undefined): string | und
   if (!occupants?.length) return undefined;
   const counts = new Map<string, number>();
   for (const o of occupants) {
-    const key = `${o.category} · ${o.gender}/${o.rankCode}`;
+    const key = `${o.category} · ${o.gender}/${o.rankCode ?? 'Civilian'}`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return [...counts.entries()].map(([k, n]) => (n > 1 ? `${k} ×${n}` : k)).join('\n');
@@ -49,6 +52,9 @@ export default function DashboardScreen() {
 
   const todayStr = localDateString();
   const { data: roomNames } = useRoomNames();
+  const [view, setView] = useState<'map' | 'tiles'>('map');
+  // Day shown by the bed map / tiles; the summary strip always reports today.
+  const [viewDate, setViewDate] = useState<string>(todayStr);
 
   // 1. Fetch dashboard counts
   const { data: counts, isLoading: countsLoading } = useQuery({
@@ -70,15 +76,13 @@ export default function DashboardScreen() {
     },
   });
 
-  // 2. Fetch daily room state for today
+  // 2. Fetch daily room state for the selected day
   const { data: roomStates, isLoading: roomsLoading } = useQuery({
-    queryKey: ['daily_room_state', todayStr],
+    queryKey: ['daily_room_state', viewDate],
     queryFn: async () => {
-      const tomorrowStr = addDaysToDateString(todayStr, 1);
-
       const { data, error } = await supabase.rpc('daily_room_state', {
-        p_from: todayStr,
-        p_to: tomorrowStr,
+        p_from: viewDate,
+        p_to: addDaysToDateString(viewDate, 1),
       });
       if (error) throw error;
 
@@ -188,7 +192,43 @@ export default function DashboardScreen() {
         </View>
       </Card>
 
-      {/* 4. Rooms Grouped by Type as Tiles */}
+      {/* 4. View switch and day */}
+      <View style={styles.viewBar}>
+        <View style={{ minWidth: 220 }}>
+          <Segmented
+            accessibilityLabel="Room view"
+            value={view}
+            onChange={setView}
+            options={[
+              { label: 'Bed map', value: 'map' },
+              { label: 'Room tiles', value: 'tiles' },
+            ]}
+          />
+        </View>
+        <View style={styles.dayStepper}>
+          <Button
+            label="‹"
+            variant="secondary"
+            accessibilityLabel="Previous day"
+            disabled={viewDate <= todayStr}
+            onPress={() => setViewDate(addDaysToDateString(viewDate, -1))}
+          />
+          <Text style={[styles.dayLabel, { color: colors.navy }]} accessibilityLiveRegion="polite">
+            {viewDate === todayStr ? `Today · ${viewDate}` : viewDate}
+          </Text>
+          <Button
+            label="›"
+            variant="secondary"
+            accessibilityLabel="Next day"
+            onPress={() => setViewDate(addDaysToDateString(viewDate, 1))}
+          />
+          {viewDate !== todayStr && (
+            <Button label="Today" variant="secondary" onPress={() => setViewDate(todayStr)} />
+          )}
+        </View>
+      </View>
+
+      {/* 5. Rooms: bed map or tiles grouped by type */}
       {roomsLoading ? (
         <View style={styles.tilesGrid}>
           {Array.from({ length: 8 }).map((_, i) => (
@@ -199,6 +239,18 @@ export default function DashboardScreen() {
         <EmptyState
           title="No rooms match these filters"
           description="Change the room type or availability filter to see more rooms."
+        />
+      ) : view === 'map' ? (
+        <RoomBedMap
+          rooms={filteredRooms}
+          roomNames={roomNames}
+          onOpenRoom={(roomId) => router.push(`/rooms/${roomId}`)}
+          onBookBed={() =>
+            router.push({
+              pathname: '/bookings/new',
+              params: { initialCheckIn: viewDate, initialCheckOut: addDaysToDateString(viewDate, 1) },
+            } as any)
+          }
         />
       ) : (
         roomGroups.map((group) => {
@@ -269,6 +321,26 @@ const styles = StyleSheet.create({
   },
   groupCount: {
     fontSize: typography.sm,
+    ...typography.numeric,
+  },
+  viewBar: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  dayStepper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  dayLabel: {
+    fontSize: typography.base,
+    fontWeight: typography.weights.bold,
+    minWidth: 150,
+    textAlign: 'center',
     ...typography.numeric,
   },
   tilesGrid: {

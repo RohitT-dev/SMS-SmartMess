@@ -13,6 +13,7 @@ import { MaskedValue } from '../../../src/ui/primitives/MaskedValue';
 import { Skeleton } from '../../../src/ui/primitives/Skeleton';
 import { spacing, typography } from '../../../src/ui/tokens';
 import { supabase } from '../../../src/lib/supabase';
+import { describeGuest } from '../../../src/features/bookings/party';
 import {
   decryptGuestPii,
   decryptRoomName,
@@ -23,7 +24,7 @@ interface Occupant {
   guest_id: string;
   bed_slot: 1 | 2;
   bookings?: { id: string; category: string; check_in: string; check_out: string; status: string };
-  booking_guests?: { rank_code: string; gender: string };
+  booking_guests?: { rank_code: string | null; gender: string; relation?: string };
 }
 
 interface RoomDetail {
@@ -97,7 +98,7 @@ export default function RoomDetailScreen() {
     if (error) throw error;
     if (!cipher) return 'Details Pending';
     const pii = decryptGuestPii(guestId, cipher);
-    return `${pii.name} (Service: ${pii.serviceNumber || 'N/A'}, Phone: ${pii.phone})`;
+    return `${pii.name} (Service: ${pii.serviceNumber || 'N/A'}, Phone: ${pii.phone || 'N/A'})`;
   };
 
   if (roomLoading) {
@@ -127,8 +128,10 @@ export default function RoomDetailScreen() {
           <View style={styles.occupantInfo}>
             <Text style={[styles.infoRow, { color: colors.text }]}>
               Category: <Text style={{ fontWeight: 'bold' }}>{alloc.bookings?.category}</Text> •
-              Rank: <Text style={{ fontWeight: 'bold' }}>{alloc.booking_guests?.rank_code}</Text> •
-              Gender: <Text style={{ fontWeight: 'bold' }}>{alloc.booking_guests?.gender}</Text>
+              Guest:{' '}
+              <Text style={{ fontWeight: 'bold' }}>
+                {alloc.booking_guests ? describeGuest(alloc.booking_guests) : '—'}
+              </Text>
             </Text>
             <Text style={[styles.infoRow, { color: colors.muted }]}>
               Stay: {alloc.bookings?.check_in} to {alloc.bookings?.check_out}
@@ -152,7 +155,7 @@ export default function RoomDetailScreen() {
           <Text style={[styles.freeNotice, { color: closedToday ? colors.muted : colors.green }]}>
             {closedToday
               ? 'Out of service today'
-              : 'Available. A second guest must match the first occupant’s gender and rank.'}
+              : 'Available. A ranked guest must match the other occupant’s gender and rank; civilians share only with their own booking.'}
           </Text>
         )}
       </Card>
@@ -191,7 +194,7 @@ export default function RoomDetailScreen() {
           upcoming.map((a) => (
             <Text key={a.id} style={[styles.infoRow, { color: colors.text }]}>
               {a.bookings?.check_in} → {a.bookings?.check_out} • Bed {a.bed_slot} •{' '}
-              {a.bookings?.category} • {a.booking_guests?.gender}/{a.booking_guests?.rank_code}
+              {a.bookings?.category} • {a.booking_guests ? describeGuest(a.booking_guests) : '—'}
             </Text>
           ))
         )}

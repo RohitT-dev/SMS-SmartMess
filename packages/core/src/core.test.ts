@@ -12,6 +12,10 @@ import {
   GuestPiiSchema,
   DenyRequestSchema,
   ApproveEvictionSchema,
+  CivilianPiiSchema,
+  CreateBookingRequestSchema,
+  canShareRoom,
+  pairParty,
 } from './index.ts';
 
 import type { BookingPlanRequest, ReportDailyRow, RoomDayState } from './index.ts';
@@ -311,5 +315,83 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
         reason: 'Too short', // 9 characters
       });
     }, /10 characters/i);
+  });
+
+  it('Sharing rule: civilians share only within their own booking', () => {
+    const officer = { gender: 'M' as const, rankCode: 'WG_CDR' as const, bookingId: 'b1' };
+    const spouse = { gender: 'F' as const, rankCode: null, bookingId: 'b1' };
+    assert.strictEqual(canShareRoom(officer, spouse), true);
+    assert.strictEqual(canShareRoom(spouse, { ...spouse, bookingId: 'b2' }), false);
+    assert.strictEqual(canShareRoom(spouse, { gender: 'F', rankCode: null }), false);
+    assert.strictEqual(canShareRoom(officer, { gender: 'M', rankCode: 'WG_CDR', bookingId: 'b2' }), true);
+    assert.strictEqual(canShareRoom(officer, { gender: 'F', rankCode: 'WG_CDR', bookingId: 'b1' }), false);
+  });
+
+  it('pairParty: primary with spouse, children together', () => {
+    const { pairs, singles } = pairParty([
+      { gender: 'M', rankCode: 'GP_CAPT', relation: 'PRIMARY' },
+      { gender: 'M', rankCode: null, relation: 'CHILD' },
+      { gender: 'F', rankCode: null, relation: 'SPOUSE' },
+      { gender: 'F', rankCode: null, relation: 'CHILD' },
+      { gender: 'F', rankCode: null, relation: 'PARENT' },
+    ]);
+    const idx = pairs.map(([a, b]) => [a.guestIndex, b.guestIndex]);
+    assert.deepStrictEqual(idx, [[0, 2], [1, 3]]);
+    assert.deepStrictEqual(singles.map((s) => s.guestIndex), [4]);
+  });
+
+  it('Allotment Engine: family of three fits one room + one bed, never beside a stranger', () => {
+    const day = '2026-10-20';
+    const states: RoomDayState[] = [
+      {
+        roomId: 'shared', roomType: 'NORMAL', displayOrder: 1, date: day, bedsTaken: 1, isClosed: false,
+        occupants: [{
+          allocationId: 'a1', bookingId: 'other', bedSlot: 1, gender: 'F', rankCode: null, relation: 'OTHER',
+          category: 'LEAVE', bookingStatus: 'CONFIRMED', checkIn: day, checkOut: '2026-10-21',
+        }],
+      },
+      { roomId: 'r2', roomType: 'NORMAL', displayOrder: 2, date: day, bedsTaken: 0, isClosed: false, occupants: [] },
+      { roomId: 'r3', roomType: 'NORMAL', displayOrder: 3, date: day, bedsTaken: 0, isClosed: false, occupants: [] },
+    ];
+    const plan = planAllotment(
+      {
+        category: 'PI', checkIn: day, checkOut: '2026-10-21', preferSharing: true,
+        guests: [
+          { gender: 'M', rankCode: 'WG_CDR', relation: 'PRIMARY' },
+          { gender: 'F', rankCode: null, relation: 'SPOUSE' },
+          { gender: 'F', rankCode: null, relation: 'CHILD' },
+        ],
+      },
+      states,
+    );
+    assert.strictEqual(plan.kind, 'ALLOT');
+    if (plan.kind !== 'ALLOT') return;
+    const roomOf = (i: number) => plan.assignments.find((a) => a.guestIndex === i)!.roomId;
+    assert.strictEqual(roomOf(0), roomOf(1));
+    assert.notStrictEqual(roomOf(2), 'shared');
+  });
+
+  it('Schema validation: booking needs one ranked primary; civilians carry no rank', () => {
+    const base = { category: 'PI', checkIn: '2026-10-01', checkOut: '2026-10-03', partySize: 2 };
+    assert.ok(
+      CreateBookingRequestSchema.safeParse({
+        ...base,
+        guests: [
+          { gender: 'M', rankCode: 'FO', relation: 'PRIMARY' },
+          { gender: 'F', rankCode: null, relation: 'SPOUSE' },
+        ],
+      }).success,
+    );
+    assert.ok(
+      !CreateBookingRequestSchema.safeParse({
+        ...base,
+        guests: [
+          { gender: 'F', rankCode: null, relation: 'SPOUSE' },
+          { gender: 'F', rankCode: null, relation: 'CHILD' },
+        ],
+      }).success,
+    );
+    assert.ok(CivilianPiiSchema.safeParse({ name: 'Asha' }).success);
+    assert.ok(!CivilianPiiSchema.safeParse({ name: ' ' }).success);
   });
 });

@@ -16,7 +16,22 @@ import { logAction } from '../../../../src/lib/activityLog';
 import { userErrorMessage } from '../../../../src/lib/userError';
 import { fetchRoomDayStates } from '../../../../src/features/bookings/roomState';
 import { decryptRoomName } from '../../../../src/features/crypto-session/cryptoSession';
-import type { Category, GuestDemand, RoomDayState } from '@sms/core';
+import {
+  canShareRoom,
+  type Category,
+  type GuestDemand,
+  type RoomDayState,
+  type SharingPerson,
+} from '@sms/core';
+import { guestRowsPayload } from '../../../../src/features/bookings/planBooking';
+import {
+  describeGuest,
+  saveCivilianDetails,
+  usePartyDetailsStore,
+} from '../../../../src/features/bookings/party';
+
+/** Stand-in booking id for the party being placed, which has no id until it is created. */
+const NEW_BOOKING = 'new';
 
 interface ParsedPayload {
   category: Category;
@@ -43,7 +58,7 @@ function parsePayload(payload: string | undefined): ParsedPayload | null {
 interface RoomOccupancy {
   closed: boolean;
   takenBeds: Set<number>;
-  occupants: Array<{ gender: string; rankCode: string }>;
+  occupants: SharingPerson[];
 }
 
 function summarizeOccupancy(states: RoomDayState[] | undefined): Record<string, RoomOccupancy> {
@@ -53,8 +68,8 @@ function summarizeOccupancy(states: RoomDayState[] | undefined): Record<string, 
     if (s.isClosed) o.closed = true;
     for (const occ of s.occupants) {
       o.takenBeds.add(occ.bedSlot);
-      if (!o.occupants.some((x) => x.gender === occ.gender && x.rankCode === occ.rankCode)) {
-        o.occupants.push({ gender: occ.gender, rankCode: occ.rankCode });
+      if (!o.occupants.some((x) => x.bookingId === occ.bookingId && x.gender === occ.gender && x.rankCode === occ.rankCode)) {
+        o.occupants.push({ gender: occ.gender, rankCode: occ.rankCode, bookingId: occ.bookingId });
       }
     }
   }
@@ -81,6 +96,9 @@ export default function MultiRoomAssignmentScreen() {
   });
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const civilianDetails = usePartyDetailsStore((s) => s.details);
+  const partyName = (idx: number) =>
+    !guests[idx]?.rankCode ? civilianDetails[idx]?.name?.trim() || null : null;
 
   const { data: rooms, isLoading: roomsLoading } = useQuery({
     queryKey: ['available_rooms_list'],
@@ -108,7 +126,7 @@ export default function MultiRoomAssignmentScreen() {
     [rooms],
   );
 
-  // Mirrors the server rules (closure, bed taken, same gender + rank in a shared room).
+  // Mirrors the server rules (closure, bed taken, sharing rule: see canShareRoom).
   const validationErrors = useMemo(() => {
     const errors: string[] = [];
     const byRoom: Record<string, Array<{ idx: number; bedSlot: 1 | 2 }>> = {};
@@ -141,13 +159,17 @@ export default function MultiRoomAssignmentScreen() {
         }
       });
 
-      const profiles = [
-        ...list.map((l) => ({ gender: guests[l.idx].gender, rankCode: guests[l.idx].rankCode })),
-        ...(occ?.occupants ?? []),
-      ];
-      if (profiles.some((p) => p.gender !== profiles[0].gender || p.rankCode !== profiles[0].rankCode)) {
+      const party: SharingPerson[] = list.map((l) => ({
+        gender: guests[l.idx].gender,
+        rankCode: guests[l.idx].rankCode,
+        bookingId: NEW_BOOKING,
+      }));
+      if (party.some((p, i) => party.slice(i + 1).some((q) => !canShareRoom(p, q)))) {
+        errors.push(`${name}: ranked guests sharing a room must have the same gender and rank.`);
+      }
+      if ((occ?.occupants ?? []).some((o) => party.some((p) => !canShareRoom(p, o)))) {
         errors.push(
-          `${name}: guests sharing a room must have the same gender and rank${occ?.occupants.length ? ' (including the guest already staying there)' : ''}.`,
+          `${name}: cannot share with the guest already staying there (ranked guests need the same gender and rank; civilians share only within their own booking).`,
         );
       }
     }
@@ -169,11 +191,7 @@ export default function MultiRoomAssignmentScreen() {
           party_size: guests.length,
           is_suite_booking: false,
         },
-        p_guests: guests.map((g, idx) => ({
-          seq: idx + 1,
-          gender: g.gender,
-          rank_code: g.rankCode,
-        })),
+        p_guests: guestRowsPayload(guests),
         p_allocations: Object.entries(assignments).map(([idxStr, a]) => ({
           guest_seq: Number(idxStr) + 1,
           room_id: a.roomId,
@@ -189,6 +207,7 @@ export default function MultiRoomAssignmentScreen() {
         entityId: bookingId as string,
         meta: { mode: 'manual' },
       });
+      await saveCivilianDetails(bookingId as string, guests);
       router.replace(`/(app)/bookings/${bookingId}/confirmed` as any);
     } catch (err: unknown) {
       setSubmitError(userErrorMessage(err, 'Failed to complete multi-room booking'));
@@ -252,7 +271,7 @@ export default function MultiRoomAssignmentScreen() {
             <Card key={idx} style={{ marginTop: spacing.md }}>
               <View style={styles.guestTitleRow}>
                 <Text style={[styles.guestTitle, { color: colors.navy }]}>
-                  Guest {idx + 1}: {g.rankCode} • {g.gender === 'M' ? 'Male' : 'Female'}
+                  {partyName(idx) ?? `Guest ${idx + 1}`}: {describeGuest(g)}
                 </Text>
                 {assign.roomId ? <Badge label={`Bed ${assign.bedSlot}`} variant="default" /> : null}
               </View>

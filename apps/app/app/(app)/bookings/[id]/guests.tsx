@@ -18,7 +18,8 @@ import {
   computeIdBlindIndex,
   getActiveKeyVersion,
 } from '../../../../src/features/crypto-session/cryptoSession';
-import { GuestPiiSchema, type GuestPii } from '@sms/core';
+import { CivilianPiiSchema, GuestPiiSchema, type GuestPii } from '@sms/core';
+import { describeGuest } from '../../../../src/features/bookings/party';
 
 export default function GuestDetailsBackfillScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -72,6 +73,8 @@ export default function GuestDetailsBackfillScreen() {
   const guestList = guests || [];
   const currentGuest = guestList[currentIdx];
   const filledCount = guestList.filter((g: any) => g.details === 'COMPLETE').length;
+  // Civilians (no rank) need only a name; ID and phone are optional, service fields don't apply.
+  const isCivilian = Boolean(currentGuest && !currentGuest.rank_code);
 
   const handleSaveCurrentGuest = async () => {
     if (!currentGuest) return;
@@ -79,7 +82,7 @@ export default function GuestDetailsBackfillScreen() {
     setErrorMsg(null);
     setFieldErrors({});
 
-    const parsed = GuestPiiSchema.safeParse(formData);
+    const parsed = (isCivilian ? CivilianPiiSchema : GuestPiiSchema).safeParse(formData);
     if (!parsed.success) {
       const byField: Record<string, string> = {};
       for (const issue of parsed.error.issues) {
@@ -147,8 +150,7 @@ export default function GuestDetailsBackfillScreen() {
             <View style={styles.formSection}>
               <View style={[styles.badgeStrip, { backgroundColor: colors.bg }]}>
                 <Text style={[styles.badgeStripText, { color: colors.text }]}>
-                  Rank: <Text style={{ fontWeight: 'bold' }}>{currentGuest.rank_code}</Text> •
-                  Gender: <Text style={{ fontWeight: 'bold' }}>{currentGuest.gender}</Text> •
+                  <Text style={{ fontWeight: 'bold' }}>{describeGuest(currentGuest)}</Text> •
                   Status: <Text style={{ fontWeight: 'bold' }}>{currentGuest.details}</Text>
                 </Text>
               </View>
@@ -164,19 +166,21 @@ export default function GuestDetailsBackfillScreen() {
                 label="Full Official Name *"
                 value={formData.name || ''}
                 onChangeText={(text) => setFormData({ ...formData, name: text })}
-                placeholder="Rank & Full Name"
+                placeholder={isCivilian ? 'Full name' : 'Rank & Full Name'}
                 error={fieldErrors.name}
               />
 
-              <Field
-                label="Service Number"
-                value={formData.serviceNumber || ''}
-                onChangeText={(text) => setFormData({ ...formData, serviceNumber: text })}
-                placeholder="e.g. 29482-K"
-              />
+              {!isCivilian && (
+                <Field
+                  label="Service Number"
+                  value={formData.serviceNumber || ''}
+                  onChangeText={(text) => setFormData({ ...formData, serviceNumber: text })}
+                  placeholder="e.g. 29482-K"
+                />
+              )}
 
               <Field
-                label="Official ID / Aadhaar / Passport Number *"
+                label={isCivilian ? 'ID / Aadhaar / Passport Number (optional)' : 'Official ID / Aadhaar / Passport Number *'}
                 value={formData.idNumber || ''}
                 onChangeText={(text) => setFormData({ ...formData, idNumber: text })}
                 placeholder="Required for exact blind index lookup"
@@ -185,7 +189,7 @@ export default function GuestDetailsBackfillScreen() {
               />
 
               <Field
-                label="Phone / Mobile Number *"
+                label={isCivilian ? 'Phone / Mobile Number (optional)' : 'Phone / Mobile Number *'}
                 value={formData.phone || ''}
                 onChangeText={(text) => setFormData({ ...formData, phone: text })}
                 placeholder="+91 XXXXX XXXXX"
@@ -193,12 +197,14 @@ export default function GuestDetailsBackfillScreen() {
                 error={fieldErrors.phone}
               />
 
-              <Field
-                label="Parent Unit / Formation"
-                value={formData.unit || ''}
-                onChangeText={(text) => setFormData({ ...formData, unit: text })}
-                placeholder="e.g. 12 Wing, AF Stn..."
-              />
+              {!isCivilian && (
+                <Field
+                  label="Parent Unit / Formation"
+                  value={formData.unit || ''}
+                  onChangeText={(text) => setFormData({ ...formData, unit: text })}
+                  placeholder="e.g. 12 Wing, AF Stn..."
+                />
+              )}
 
               <Field
                 label="Special Dietary / Protocol Notes"

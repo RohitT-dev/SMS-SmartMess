@@ -11,6 +11,7 @@ import { Select } from '../../../../src/ui/primitives/Select';
 import { Checkbox } from '../../../../src/ui/primitives/Checkbox';
 import { DateRange } from '../../../../src/ui/primitives/DateRange';
 import { Banner } from '../../../../src/ui/primitives/Banner';
+import { Field } from '../../../../src/ui/primitives/Field';
 import { spacing, typography } from '../../../../src/ui/tokens';
 import { supabase } from '../../../../src/lib/supabase';
 import { logAction } from '../../../../src/lib/activityLog';
@@ -21,12 +22,23 @@ import {
   localDateString,
 } from '../../../../src/lib/dates';
 import { fetchRoomDayStates } from '../../../../src/features/bookings/roomState';
-import { alternatesHorizonEnd } from '../../../../src/features/bookings/planBooking';
+import {
+  alternatesHorizonEnd,
+  guestRowsPayload,
+} from '../../../../src/features/bookings/planBooking';
+import {
+  describeGuest,
+  saveCivilianDetails,
+  usePartyDetailsStore,
+} from '../../../../src/features/bookings/party';
 import { useRoomNames } from '../../../../src/features/rooms/useRoomNames';
 import {
   planAllotment,
   RANK_ORDER,
+  RELATION_LABELS,
+  isCivilianRelation,
   type Category,
+  type GuestRelation,
   type Gender,
   type RankCode,
   type RoomType,
@@ -71,8 +83,17 @@ export default function NewBookingScreen() {
   );
   const [preferredType, setPreferredType] = useState<RoomType | 'ANY'>('VIP');
   const [guests, setGuests] = useState<GuestDemand[]>(
-    restored?.guests?.length ? restored.guests : [{ gender: 'M', rankCode: 'WG_CDR' }],
+    restored?.guests?.length
+      ? restored.guests
+      : [{ gender: 'M', rankCode: 'WG_CDR', relation: 'PRIMARY' }],
   );
+  // Civilian names/contacts live outside the route params (see usePartyDetailsStore).
+  const civilianDetails = usePartyDetailsStore((s) => s.details);
+  const setCivilianDetails = usePartyDetailsStore((s) => s.setDetails);
+  useEffect(() => {
+    if (!draft) usePartyDetailsStore.getState().clear();
+    // Only on entry: a draft means we came back from the alternates screen with the same party.
+  }, []);
   const [preferSharing, setPreferSharing] = useState<boolean>(restored?.preferSharing ?? false);
   const [submitting, setSubmitting] = useState(false);
   const [bookingError, setBookingError] = useState<string | null>(null);
@@ -143,23 +164,67 @@ export default function NewBookingScreen() {
 
   const noRoomsConfigured = datesValid && roomStates !== undefined && roomStates.length === 0;
 
-  const handleAddGuest = () => {
+  const handleAddServiceMember = () => {
     if (guests.length < 40) {
-      // New guests start as a copy of the previous one: parties are usually same gender/rank.
-      setGuests([...guests, { ...guests[guests.length - 1] }]);
+      // Starts as a copy of the primary: colleagues travelling together usually match.
+      const primary = guests[0];
+      setGuests([...guests, { gender: primary.gender, rankCode: primary.rankCode, relation: 'SERVICE' }]);
+    }
+  };
+
+  const handleAddCivilian = () => {
+    if (guests.length < 40) {
+      const hasSpouse = guests.some((g) => g.relation === 'SPOUSE');
+      setGuests([
+        ...guests,
+        {
+          gender: guests[0].gender === 'M' ? 'F' : 'M',
+          rankCode: null,
+          relation: hasSpouse ? 'CHILD' : 'SPOUSE',
+        },
+      ]);
     }
   };
 
   const handleRemoveGuest = (index: number) => {
-    if (guests.length > 1) {
-      setGuests(guests.filter((_, i) => i !== index));
+    if (index === 0 || guests.length <= 1) return;
+    setGuests(guests.filter((_, i) => i !== index));
+    // Details are keyed by position: shift the ones after the removed guest down.
+    const next: typeof civilianDetails = {};
+    for (const [k, v] of Object.entries(civilianDetails)) {
+      const i = Number(k);
+      if (i < index) next[i] = v;
+      else if (i > index) next[i - 1] = v;
+    }
+    setCivilianDetails(next);
+  };
+
+  const handleUpdateGuest = (index: number, patch: Partial<GuestDemand>) => {
+    const updated = [...guests];
+    updated[index] = { ...updated[index], ...patch };
+    setGuests(updated);
+  };
+
+  const handleChangeRelation = (index: number, relation: GuestRelation) => {
+    if (isCivilianRelation(relation)) {
+      handleUpdateGuest(index, { relation, rankCode: null });
+    } else {
+      handleUpdateGuest(index, { relation, rankCode: guests[index].rankCode ?? guests[0].rankCode });
     }
   };
 
-  const handleUpdateGuest = (index: number, key: 'gender' | 'rankCode', val: Gender | RankCode) => {
-    const updated = [...guests];
-    updated[index] = { ...updated[index], [key]: val };
-    setGuests(updated);
+  const handleCivilianDetail = (index: number, key: 'name' | 'phone', value: string) => {
+    const current = civilianDetails[index] ?? { name: '', phone: '' };
+    setCivilianDetails({ ...civilianDetails, [index]: { ...current, [key]: value } });
+  };
+
+  const civiliansMissingName = guests.filter(
+    (g, idx) => !g.rankCode && !civilianDetails[idx]?.name?.trim(),
+  ).length;
+  const partyLabel = (idx: number) => {
+    const g = guests[idx];
+    const name = !g.rankCode ? civilianDetails[idx]?.name?.trim() : '';
+    return name ? `${name} (${RELATION_LABELS[g.relation ?? 'OTHER']})` : `Person ${idx + 1}`;
   };
 
   const handleAllotDirect = async () => {
@@ -175,11 +240,7 @@ export default function NewBookingScreen() {
           party_size: guests.length,
           is_suite_booking: false,
         },
-        p_guests: guests.map((g, idx) => ({
-          seq: idx + 1,
-          gender: g.gender,
-          rank_code: g.rankCode,
-        })),
+        p_guests: guestRowsPayload(guests),
         p_allocations: plan.assignments.map((a) => ({
           guest_seq: a.guestIndex + 1,
           room_id: a.roomId,
@@ -195,6 +256,7 @@ export default function NewBookingScreen() {
         entityId: bookingId as string,
         meta: { category, party_size: guests.length, mode: 'auto' },
       });
+      await saveCivilianDetails(bookingId as string, guests);
       router.replace(`/(app)/bookings/${bookingId}/confirmed` as any);
     } catch (err: unknown) {
       setBookingError(userErrorMessage(err, 'Failed to allot booking'));
@@ -270,50 +332,94 @@ export default function NewBookingScreen() {
         </Card>
 
         <Card style={styles.spaced}>
-          <View style={styles.guestHeaderRow}>
-            <Text style={[styles.sectionTitle, styles.noMargin, { color: colors.navy }]}>
-              2. GUESTS ({guests.length} person{guests.length > 1 ? 's' : ''})
-            </Text>
-            <Button label="+ Add Guest" variant="secondary" onPress={handleAddGuest} />
-          </View>
+          <Text style={[styles.sectionTitle, { color: colors.navy }]}>
+            2. PARTY ({guests.length} person{guests.length > 1 ? 's' : ''})
+          </Text>
           <Text style={[styles.helpText, { color: colors.muted }]}>
-            Gender and rank are required upfront to enforce room sharing rules (two guests share a
-            room only with the same gender and rank). Names and ID numbers can be backfilled later.
+            Every booking is for one ranked person. Add family members and other civilians
+            travelling with them: they need no rank and may share a room with anyone in this
+            booking, but never with another booking's guests. Ranked guests share only with the same
+            gender and rank. Every person takes one bed.
           </Text>
 
-          {guests.map((g, idx) => (
-            <View key={idx} style={[styles.guestRow, { borderColor: colors.border }]}>
-              <View style={styles.guestTitleRow}>
-                <Text style={[styles.guestSeq, { color: colors.navy }]}>Guest {idx + 1}</Text>
-                {guests.length > 1 && (
-                  <Button
-                    label="Remove"
-                    variant="secondary"
-                    accessibilityLabel={`Remove guest ${idx + 1}`}
-                    onPress={() => handleRemoveGuest(idx)}
+          {guests.map((g, idx) => {
+            const isPrimary = idx === 0;
+            const civilian = !g.rankCode;
+            return (
+              <View key={idx} style={[styles.guestRow, { borderColor: colors.border }]}>
+                <View style={styles.guestTitleRow}>
+                  <Text style={[styles.guestSeq, { color: colors.navy }]}>
+                    {isPrimary ? 'Primary person (ranked)' : `Person ${idx + 1}`}
+                  </Text>
+                  {!isPrimary && (
+                    <Button
+                      label="Remove"
+                      variant="secondary"
+                      accessibilityLabel={`Remove person ${idx + 1}`}
+                      onPress={() => handleRemoveGuest(idx)}
+                    />
+                  )}
+                </View>
+                {!isPrimary && (
+                  <Select
+                    label="Relation"
+                    value={g.relation ?? (civilian ? 'OTHER' : 'SERVICE')}
+                    onChange={(val: string) => handleChangeRelation(idx, val as GuestRelation)}
+                    options={(['SPOUSE', 'CHILD', 'PARENT', 'OTHER', 'SERVICE'] as const).map((r) => ({
+                      label: r === 'SERVICE' ? 'Service member (ranked)' : RELATION_LABELS[r],
+                      value: r,
+                    }))}
+                  />
+                )}
+                {civilian && (
+                  <>
+                    <Field
+                      label="Full Name *"
+                      value={civilianDetails[idx]?.name ?? ''}
+                      onChangeText={(text) => handleCivilianDetail(idx, 'name', text)}
+                      placeholder="Name as on ID"
+                      hint="Encrypted on this device before upload"
+                      error={
+                        !civilianDetails[idx]?.name?.trim() ? 'Name is required for civilians' : undefined
+                      }
+                    />
+                    <Field
+                      label="Contact Number (optional)"
+                      value={civilianDetails[idx]?.phone ?? ''}
+                      onChangeText={(text) => handleCivilianDetail(idx, 'phone', text)}
+                      placeholder="+91 XXXXX XXXXX"
+                      keyboardType="phone-pad"
+                    />
+                  </>
+                )}
+                <Select
+                  label="Gender"
+                  value={g.gender}
+                  onChange={(val: string) => handleUpdateGuest(idx, { gender: val as Gender })}
+                  options={[
+                    { label: 'Male', value: 'M' },
+                    { label: 'Female', value: 'F' },
+                  ]}
+                />
+                {!civilian && (
+                  <Select
+                    label="Rank"
+                    value={g.rankCode ?? ''}
+                    onChange={(val: string) => handleUpdateGuest(idx, { rankCode: val as RankCode })}
+                    options={RANK_ORDER.map((r) => ({
+                      label: `${r.label} (${r.code})`,
+                      value: r.code,
+                    }))}
                   />
                 )}
               </View>
-              <Select
-                label="Gender"
-                value={g.gender}
-                onChange={(val: string) => handleUpdateGuest(idx, 'gender', val as Gender)}
-                options={[
-                  { label: 'Male', value: 'M' },
-                  { label: 'Female', value: 'F' },
-                ]}
-              />
-              <Select
-                label="Rank"
-                value={g.rankCode}
-                onChange={(val: string) => handleUpdateGuest(idx, 'rankCode', val as RankCode)}
-                options={RANK_ORDER.map((r) => ({
-                  label: `${r.label} (${r.code})`,
-                  value: r.code,
-                }))}
-              />
-            </View>
-          ))}
+            );
+          })}
+
+          <View style={styles.addRow}>
+            <Button label="+ Add Family / Civilian" variant="secondary" onPress={handleAddCivilian} />
+            <Button label="+ Add Service Member" variant="secondary" onPress={handleAddServiceMember} />
+          </View>
         </Card>
 
         <Card style={styles.spaced}>
@@ -340,6 +446,12 @@ export default function NewBookingScreen() {
                 type="success"
                 message={`Available! All ${guests.length} guest${guests.length > 1 ? 's' : ''} can be accommodated for ${checkIn} → ${checkOut}.`}
               />
+              {civiliansMissingName > 0 && (
+                <Banner
+                  type="warning"
+                  message={`Enter a name for ${civiliansMissingName} civilian guest${civiliansMissingName > 1 ? 's' : ''} before confirming.`}
+                />
+              )}
               {plan.usedFallbackType && (
                 <Banner
                   type="warning"
@@ -353,7 +465,8 @@ export default function NewBookingScreen() {
                   .sort((a, b) => a.guestIndex - b.guestIndex)
                   .map((a) => (
                     <Text key={a.guestIndex} style={[styles.proposalRow, { color: colors.text }]}>
-                      Guest {a.guestIndex + 1} → {roomNames?.[a.roomId] ?? '…'} (
+                      {partyLabel(a.guestIndex)} · {describeGuest(guests[a.guestIndex])} →{' '}
+                      {roomNames?.[a.roomId] ?? '…'} (
                       {ROOM_TYPE_LABEL[a.roomType] ?? a.roomType}), Bed {a.bedSlot}
                       {roomsWithOccupants.has(a.roomId) ? ' — shares with a current guest' : ''}
                     </Text>
@@ -365,12 +478,12 @@ export default function NewBookingScreen() {
                   label="Confirm & Allot Now"
                   onPress={handleAllotDirect}
                   loading={submitting}
-                  disabled={isBackdated}
+                  disabled={isBackdated || civiliansMissingName > 0}
                 />
                 <Button
                   label="Customise Bed Placement"
                   variant="secondary"
-                  disabled={isBackdated}
+                  disabled={isBackdated || civiliansMissingName > 0}
                   onPress={() => {
                     router.push({
                       pathname: '/(app)/bookings/new/rooms',
@@ -402,7 +515,7 @@ export default function NewBookingScreen() {
                     : 'See Alternate Dates & Options'
                 }
                 variant="primary"
-                disabled={isBackdated}
+                disabled={isBackdated || civiliansMissingName > 0}
                 onPress={() => {
                   router.push({
                     pathname: '/(app)/bookings/new/alternates',
@@ -434,14 +547,11 @@ const styles = StyleSheet.create({
     fontWeight: typography.weights.bold,
     marginBottom: spacing.md,
   },
-  noMargin: {
-    marginBottom: 0,
-  },
-  guestHeaderRow: {
+  addRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: spacing.xs,
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    paddingTop: spacing.sm,
   },
   helpText: {
     fontSize: typography.xs,

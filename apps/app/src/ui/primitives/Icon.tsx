@@ -1,4 +1,5 @@
 import React from 'react';
+import { Platform } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 
 /**
@@ -39,6 +40,13 @@ const PATHS = {
   logout: ['M10 4H5v16h5', 'M15 8l4 4-4 4', 'M19 12H9'],
 } as const;
 
+// react-native-svg forwards unknown props to the DOM on web, where the native
+// a11y props trigger React warnings; use aria-hidden there instead.
+const HIDDEN_FROM_A11Y =
+  Platform.OS === 'web'
+    ? ({ 'aria-hidden': true } as const)
+    : ({ accessibilityElementsHidden: true, importantForAccessibility: 'no-hide-descendants' } as const);
+
 export type IconName = keyof typeof PATHS;
 
 export interface IconProps {
@@ -58,8 +66,7 @@ export const Icon: React.FC<IconProps> = ({ name, size = 20, color, strokeWidth 
     strokeWidth={strokeWidth}
     strokeLinecap="round"
     strokeLinejoin="round"
-    accessibilityElementsHidden
-    importantForAccessibility="no-hide-descendants"
+    {...HIDDEN_FROM_A11Y}
   >
     {PATHS[name].map((d) => (
       <Path key={d} d={d} />

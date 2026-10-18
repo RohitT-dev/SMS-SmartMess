@@ -83,6 +83,28 @@ export const RANKS: readonly RankInfo[] = [
 ] as const;
 
 export const RANK_ORDER = RANKS;
+
+/**
+ * Who a person is within a booking. PRIMARY is the ranked person the booking is for (exactly one);
+ * SERVICE is another ranked member of the party; the rest are civilians and carry no rank.
+ */
+export type GuestRelation = 'PRIMARY' | 'SERVICE' | 'SPOUSE' | 'CHILD' | 'PARENT' | 'OTHER';
+
+export const CIVILIAN_RELATIONS = ['SPOUSE', 'CHILD', 'PARENT', 'OTHER'] as const;
+export type CivilianRelation = (typeof CIVILIAN_RELATIONS)[number];
+
+export const RELATION_LABELS: Record<GuestRelation, string> = {
+  PRIMARY: 'Primary',
+  SERVICE: 'Service member',
+  SPOUSE: 'Spouse',
+  CHILD: 'Child',
+  PARENT: 'Parent',
+  OTHER: 'Other civilian'
+};
+
+export function isCivilianRelation(relation: GuestRelation | null | undefined): boolean {
+  return relation === 'SPOUSE' || relation === 'CHILD' || relation === 'PARENT' || relation === 'OTHER';
+}
 export type Category = VisitorCategory;
 
 export type BookingStatus = 'CONFIRMED' | 'CANCELLED' | 'DISPLACED' | 'COMPLETED';

@@ -24,6 +24,7 @@ import {
   getActiveKeyVersion,
 } from '../../../../src/features/crypto-session/cryptoSession';
 import { humanizeStatus } from '../../../../src/lib/labels';
+import { describeGuest } from '../../../../src/features/bookings/party';
 
 export default function BookingDetailRecordScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -54,6 +55,12 @@ export default function BookingDetailRecordScreen() {
     },
   });
 
+  const guestsBySeq = [...(booking?.booking_guests ?? [])].sort((x: any, y: any) => x.seq - y.seq);
+  const guestNo = (guestId: string) => {
+    const i = guestsBySeq.findIndex((g: any) => g.id === guestId);
+    return i === -1 ? null : i + 1;
+  };
+
   // 2. Fetch timeline from audit_log (no PII in audit_log meta)
   const { data: auditEvents } = useQuery({
     queryKey: ['booking_audit', id],
@@ -79,7 +86,9 @@ export default function BookingDetailRecordScreen() {
     });
     if (!cipher) return 'Details Pending';
     const pii = decryptGuestPii(guestId, cipher);
-    return `${pii.name} (Service No: ${pii.serviceNumber || 'N/A'}, Phone: ${pii.phone}, Unit: ${pii.unit || 'N/A'})`;
+    const guest = booking?.booking_guests?.find((g: any) => g.id === guestId);
+    if (guest && !guest.rank_code) return `${pii.name} (Phone: ${pii.phone || 'N/A'})`;
+    return `${pii.name} (Service No: ${pii.serviceNumber || 'N/A'}, Phone: ${pii.phone || 'N/A'}, Unit: ${pii.unit || 'N/A'})`;
   };
 
   const handleCancelBooking = async () => {
@@ -182,11 +191,11 @@ export default function BookingDetailRecordScreen() {
             />
           </View>
 
-          {booking?.booking_guests?.map((guest: any, idx: number) => (
+          {guestsBySeq.map((guest: any, idx: number) => (
             <View key={guest.id} style={[styles.guestItem, { borderColor: colors.border }]}>
               <View style={styles.guestItemHeader}>
                 <Text style={[styles.guestName, { color: colors.navy }]}>
-                  Guest #{idx + 1}: Rank {guest.rank_code} • Gender {guest.gender}
+                  #{idx + 1}: {describeGuest(guest)}
                 </Text>
                 <Badge
                   label={guest.details === 'COMPLETE' ? 'Details Complete' : 'Details Pending'}
@@ -215,6 +224,7 @@ export default function BookingDetailRecordScreen() {
                   {decryptRoomName(a.room_id, a.rooms?.name_enc)}
                 </Text>{' '}
                 • Bed Slot: <Text style={{ fontWeight: 'bold' }}>{a.bed_slot}</Text>
+                {guestNo(a.guest_id) ? ` • Person #${guestNo(a.guest_id)}` : ''}
               </Text>
               <Badge label={humanizeStatus(a.status)} variant={a.status === 'ACTIVE' ? 'success' : 'default'} />
             </View>
