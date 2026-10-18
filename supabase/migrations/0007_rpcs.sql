@@ -462,7 +462,7 @@ BEGIN
     AND r.room_type <> 'SUITE'
     AND a.stay && daterange(p_check_in, p_check_out, '[)')
     AND (
-      (p_category = 'MSA' AND b.category IN ('PI', 'LEAVE', 'TD')) OR
+      (p_category = 'MFA' AND b.category IN ('PI', 'LEAVE', 'TD')) OR
       (p_category = 'PI' AND b.category IN ('LEAVE', 'TD'))
     )
   -- TODO(ranking): Stable order pending final ranking algorithm
@@ -562,7 +562,7 @@ BEGIN
     RAISE EXCEPTION 'ERR_PERMISSION' USING errcode = 'P0001';
   END IF;
 
-  IF p_category IN ('MSA', 'PI') THEN
+  IF p_category IN ('MFA', 'PI') THEN
     RAISE EXCEPTION 'ERR_CANNOT_DENY_PRIORITY' USING errcode = 'P0001';
   END IF;
 

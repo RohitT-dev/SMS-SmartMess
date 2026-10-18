@@ -14,3 +14,7 @@ web-build/
 *.tsbuildinfo
 supabase/.temp/
 .temp/
+*.apk
+apps/app/android/app/build/
+apps/app/android/.gradle/
+apps/app/android/local.properties

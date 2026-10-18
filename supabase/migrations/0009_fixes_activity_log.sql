@@ -670,7 +670,7 @@ BEGIN
     AND r.room_type <> 'SUITE'
     AND a.stay && daterange(p_check_in, p_check_out, '[)')
     AND (
-      (p_category = 'MSA' AND b.category IN ('PI', 'LEAVE', 'TD')) OR
+      (p_category = 'MFA' AND b.category IN ('PI', 'LEAVE', 'TD')) OR
       (p_category = 'PI' AND b.category IN ('LEAVE', 'TD'))
     )
   ORDER BY b.check_in ASC, a.id ASC;
@@ -797,7 +797,7 @@ DECLARE
   v_id UUID;
 BEGIN
   -- Business-rule validation first so the error is the same for every caller.
-  IF p_category IN ('MSA', 'PI') THEN
+  IF p_category IN ('MFA', 'PI') THEN
     RAISE EXCEPTION 'ERR_CANNOT_DENY_PRIORITY' USING errcode = 'P0001';
   END IF;
 

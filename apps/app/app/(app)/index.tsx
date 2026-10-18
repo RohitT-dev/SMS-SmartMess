@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import { useRouter } from 'expo-router';
-import { useQuery } from '@tanstack/react-query';
+import { useRouter, useFocusEffect } from 'expo-router';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useThemeStore } from '../../src/state/themeStore';
 import { Screen } from '../../src/ui/primitives/Screen';
 import { Stat } from '../../src/ui/primitives/Stat';
@@ -9,6 +9,7 @@ import { Tile } from '../../src/ui/primitives/Tile';
 import { Select } from '../../src/ui/primitives/Select';
 import { Card } from '../../src/ui/primitives/Card';
 import { Banner } from '../../src/ui/primitives/Banner';
+import { Button } from '../../src/ui/primitives/Button';
 import { Skeleton } from '../../src/ui/primitives/Skeleton';
 import { EmptyState } from '../../src/ui/primitives/EmptyState';
 import { spacing, typography } from '../../src/ui/tokens';
@@ -43,6 +44,7 @@ const GROUP_LABELS: Record<string, string> = {
 export default function DashboardScreen() {
   const router = useRouter();
   const colors = useThemeStore((s) => s.colors);
+  const queryClient = useQueryClient();
 
   const [typeFilter, setTypeFilter] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
@@ -51,7 +53,11 @@ export default function DashboardScreen() {
   const { data: roomNames } = useRoomNames();
 
   // 1. Fetch dashboard counts
-  const { data: counts, isLoading: countsLoading } = useQuery({
+  const {
+    data: counts,
+    isLoading: countsLoading,
+    refetch: refetchCounts,
+  } = useQuery({
     queryKey: ['dashboard_counts', todayStr],
     queryFn: async () => {
       const { data, error } = await supabase.rpc('dashboard_counts', { p_date: todayStr });
@@ -71,7 +77,11 @@ export default function DashboardScreen() {
   });
 
   // 2. Fetch daily room state for today
-  const { data: roomStates, isLoading: roomsLoading } = useQuery({
+  const {
+    data: roomStates,
+    isLoading: roomsLoading,
+    refetch: refetchRoomStates,
+  } = useQuery({
     queryKey: ['daily_room_state', todayStr],
     queryFn: async () => {
       const tomorrowStr = addDaysToDateString(todayStr, 1);
@@ -96,7 +106,42 @@ export default function DashboardScreen() {
     },
   });
 
-  // Live updates come from the app-wide useRealtimeSync() in (app)/_layout.
+  // Real-time re-fetch whenever user views or returns to this screen
+  useFocusEffect(
+    useCallback(() => {
+      refetchCounts();
+      refetchRoomStates();
+    }, [refetchCounts, refetchRoomStates])
+  );
+
+  // Realtime subscription setup
+  const channelNameRef = useRef(`dashboard-realtime-${Math.random().toString(36).slice(2)}`);
+
+  useEffect(() => {
+    const channel = supabase
+      .channel(channelNameRef.current)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'allocations' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['dashboard_counts'] });
+        queryClient.invalidateQueries({ queryKey: ['daily_room_state'] });
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bookings' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['dashboard_counts'] });
+        queryClient.invalidateQueries({ queryKey: ['daily_room_state'] });
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'booking_guests' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['dashboard_counts'] });
+        queryClient.invalidateQueries({ queryKey: ['daily_room_state'] });
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'rooms' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['dashboard_counts'] });
+        queryClient.invalidateQueries({ queryKey: ['daily_room_state'] });
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [queryClient]);
 
   // Filter rooms
   const filteredRooms = (roomStates || []).filter((r: any) => {
@@ -154,7 +199,15 @@ export default function DashboardScreen() {
         </View>
       ) : null}
 
-      {/* 3. Filters */}
+      {/* 3. Action bar & Filters */}
+      <View style={{ marginBottom: spacing.sm, flexDirection: 'row', justifyContent: 'flex-end' }}>
+        <Button
+          label="📅 Room Occupancy Grid Matrix (Custom Dates & PDF)"
+          variant="secondary"
+          onPress={() => router.push('/(app)/reports/grid' as any)}
+        />
+      </View>
+
       <Card style={styles.filterCard}>
         <View style={styles.filterRow}>
           <View style={{ flex: 1, minWidth: 200 }}>

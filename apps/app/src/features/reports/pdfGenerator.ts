@@ -18,18 +18,18 @@ export function buildHtmlReport({
   denials = []
 }: GeneratePdfOptions): string {
   // Build inline SVG for the chart
-  const daysMap = new Map<string, { msa: number; pi: number; leave: number; td: number; suite: number; total: number }>();
+  const daysMap = new Map<string, { mfa: number; pi: number; leave: number; td: number; suite: number; total: number }>();
 
   for (const r of dailyRows) {
     let entry = daysMap.get(r.day);
     if (!entry) {
-      entry = { msa: 0, pi: 0, leave: 0, td: 0, suite: 0, total: 0 };
+      entry = { mfa: 0, pi: 0, leave: 0, td: 0, suite: 0, total: 0 };
       daysMap.set(r.day, entry);
     }
     if (r.roomType === 'SUITE') {
       entry.suite += r.people;
     } else {
-      if (r.category === 'MFA') entry.msa += r.people;
+      if (r.category === 'MFA') entry.mfa += r.people;
       if (r.category === 'PI') entry.pi += r.people;
       if (r.category === 'LEAVE') entry.leave += r.people;
       if (r.category === 'TD') entry.td += r.people;
@@ -57,7 +57,7 @@ export function buildHtmlReport({
     let currY = padT + plotH;
 
     const segs = [
-      { c: d.msa, col: '#12283F' },
+      { c: d.mfa, col: '#12283F' },
       { c: d.pi, col: '#2F5D8C' },
       { c: d.leave, col: '#138808' },
       { c: d.td, col: '#C25E00' }
@@ -122,7 +122,7 @@ export function buildHtmlReport({
     </div>
     <div class="stat-card">
       <div class="stat-label">Priority Share</div>
-      <div class="stat-value">${insights.msaPiSharePercentage}%</div>
+      <div class="stat-value">${insights.mfaPiSharePercentage}%</div>
     </div>
   </div>
 

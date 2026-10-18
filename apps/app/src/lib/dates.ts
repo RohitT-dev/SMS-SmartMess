@@ -19,3 +19,14 @@ export function isValidDateString(value: string): boolean {
   const dt = new Date(Date.UTC(y, m - 1, d));
   return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
 }
+
+/** Standard Military Mess check-in and check-out time */
+export const CHECK_IN_TIME_STR = '12:00 PM';
+export const CHECK_OUT_TIME_STR = '12:00 PM';
+
+/** Formats stay interval with explicit 12:00 PM rule */
+export function formatStayWith12PM(checkIn: string, checkOut: string): string {
+  if (!checkIn || !checkOut) return '—';
+  return `${checkIn} (12 PM) → ${checkOut} (12 PM)`;
+}
+

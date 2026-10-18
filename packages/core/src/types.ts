@@ -55,6 +55,8 @@ export interface Booking {
 
 export interface BookingGuest {
   id: string;
+  guestCode?: string;
+  guest_code?: string;
   bookingId: string;
   seq: number;
   gender: Gender;
@@ -66,7 +68,8 @@ export interface BookingGuest {
 export interface GuestPii {
   name: string;
   serviceNumber?: string | null;
-  idNumber: string;
+  idNumber?: string | null;
+  idType?: string | null;
   phone: string;
   unit?: string | null;
   notes?: string | null;
@@ -218,7 +221,7 @@ export interface ReportInsights {
   dailyAverage: number;
   peakDay: string;
   peakCount: number;
-  msaPiSharePercentage: number;
+  mfaPiSharePercentage: number;
   bedsTotal: number;
   peakOccupancyPercentage: number;
   denialCount: number;

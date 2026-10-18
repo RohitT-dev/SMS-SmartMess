@@ -5,7 +5,7 @@ import { layout, spacing, typography } from '../tokens';
 
 export interface BadgeProps {
   label: string;
-  variant?: 'default' | 'success' | 'warning' | 'error' | 'saffron';
+  variant?: 'default' | 'success' | 'warning' | 'error' | 'saffron' | 'navy' | 'neutral' | 'green';
 }
 
 export const Badge: React.FC<BadgeProps> = ({ label, variant = 'default' }) => {
@@ -14,6 +14,7 @@ export const Badge: React.FC<BadgeProps> = ({ label, variant = 'default' }) => {
   const getBadgeColors = () => {
     switch (variant) {
       case 'success':
+      case 'green':
         return { bg: colors.greenSoft, text: colors.green };
       case 'warning':
         return { bg: colors.orangeSoft, text: colors.orange };
@@ -21,6 +22,9 @@ export const Badge: React.FC<BadgeProps> = ({ label, variant = 'default' }) => {
         return { bg: colors.redSoft, text: colors.red };
       case 'saffron':
         return { bg: colors.saffronSoft, text: colors.saffronInk };
+      case 'navy':
+        return { bg: `${colors.navy}18`, text: colors.navy };
+      case 'neutral':
       default:
         return { bg: colors.greySoft, text: colors.text };
     }

@@ -38,6 +38,18 @@ export const NAV_ITEMS: NavItem[] = [
     description: 'Search and manage bookings',
   },
   {
+    label: 'Booking Requests',
+    icon: 'clipboard',
+    path: '/requests',
+    description: 'Pending room allotment queue',
+  },
+  {
+    label: 'Past Bookings',
+    icon: 'archive',
+    path: '/bookings/past',
+    description: 'Past stays & printable PDF register',
+  },
+  {
     label: 'Reports & Insights',
     icon: 'chart',
     path: '/reports',
@@ -91,9 +103,12 @@ export function isNavActive(itemPath: string, pathname: string): boolean {
   if (itemPath === '/') return pathname === '/';
   if (itemPath === '/bookings') {
     // "/bookings/new" belongs to the New Booking entry, not the ledger.
+    // "/bookings/past" belongs to the Past Bookings entry.
     return (
       pathname === '/bookings' ||
-      (pathname.startsWith('/bookings/') && !pathname.startsWith('/bookings/new'))
+      (pathname.startsWith('/bookings/') &&
+        !pathname.startsWith('/bookings/new') &&
+        !pathname.startsWith('/bookings/past'))
     );
   }
   return pathname === itemPath || pathname.startsWith(`${itemPath}/`);

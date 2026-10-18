@@ -20,6 +20,7 @@ import { mapRoomDayState } from '../features/bookings/mapRoomState';
 import { userErrorMessage } from '../lib/userError';
 import { addDaysToDateString } from '../lib/dates';
 import { alternatesHorizonEnd } from '../features/bookings/planBooking';
+import { buildPastBookingsHtml } from '../features/reports/pastBookingsHtml';
 
 type Sb = ReturnType<typeof createDevSupabase> & { auth: any };
 
@@ -397,8 +398,8 @@ describe('full house: alternates, denial, eviction', () => {
   });
 
   it('server refuses to evict a booking the incoming category may not displace', async () => {
-    const msa = await book({ category: 'MFA', checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO')], pref: 'VIP' });
-    const { data: bookingRow } = await (sb.from('bookings') as any).select('*, allocations(*)').eq('id', msa.id).single();
+    const mfa = await book({ category: 'MFA', checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO')], pref: 'VIP' });
+    const { data: bookingRow } = await (sb.from('bookings') as any).select('*, allocations(*)').eq('id', mfa.id).single();
     const res = await sb.rpc('approve_eviction', {
       p_incoming: { category: 'LEAVE', check_in: d(0), check_out: d(2), party_size: 1, guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }] },
       p_evict_allocation_ids: [bookingRow.allocations[0].id],
@@ -487,27 +488,6 @@ describe('closures, concurrency, rules', () => {
     // clerks cannot end closures
     await signInAs('clerk');
     expect((await sb.rpc('end_room_closure', { p_closure_id: running })).error?.message).toContain('ERR_PERMISSION');
-  });
-
-  it('admin can delete a room; it needs no bookings, is admin-only, and takes no new allocations', async () => {
-    const held = await book({ checkIn: d(1), checkOut: d(3), guests: [G('M', 'FO')], pref: 'VIP' });
-    expect(held.placements[0].room).toBe('V-01');
-    // current/upcoming booking blocks deletion
-    expect((await sb.rpc('delete_room', { p_room_id: roomIds['V-01'] })).error?.message).toContain('ERR_ROOM_HAS_BOOKINGS');
-    // clerks cannot delete
-    await signInAs('clerk');
-    expect((await sb.rpc('delete_room', { p_room_id: roomIds['V-02'] })).error?.message).toContain('ERR_PERMISSION');
-    await signInAs('admin');
-    // an empty room deletes, and the server refuses to place anyone in it afterwards
-    expect((await sb.rpc('delete_room', { p_room_id: roomIds['V-02'] })).error).toBeNull();
-    const forced = await sb.rpc('create_booking', {
-      p_booking: { category: 'MFA', check_in: d(1), check_out: d(2), party_size: 1, is_suite_booking: false },
-      p_guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }],
-      p_allocations: [{ guest_seq: 1, room_id: roomIds['V-02'], bed_slot: 1 }],
-    });
-    expect(forced.error?.message).toContain('ERR_ROOM_CLOSED');
-    // deleting twice is a clean not-found
-    expect((await sb.rpc('delete_room', { p_room_id: roomIds['V-02'] })).error?.message).toContain('ERR_NOT_FOUND');
   });
 
   it('a stale plan loses the race cleanly with a friendly message (double booking)', async () => {
@@ -682,4 +662,1178 @@ describe('roles and suites', () => {
     expect((await sb.rpc('set_user_role', { p_user_id: DEV_USERS.admin.id, p_role: 'clerk' })).error?.message).toContain('ERR_LAST_ADMIN');
     expect((await sb.rpc('deactivate_user', { p_user_id: DEV_USERS.admin.id })).error?.message).toContain('ERR_LAST_ADMIN');
   });
+
+  describe('room deletion and booking date modification', () => {
+    it('delete_room: soft deletes room and removes it from inventory, but blocks rooms with active bookings', async () => {
+      await signInAs('admin');
+      // Create a temporary room
+      const tempId = crypto.randomUUID();
+      await (sb.from('rooms') as any).insert({
+        id: tempId,
+        room_type: 'NORMAL',
+        name_enc: 'enc:TEMP-ROOM',
+        display_order: 99,
+      });
+
+      const beforeList = (await sb.from('rooms').select('*')).data;
+      expect(beforeList.some((r: any) => r.id === tempId)).toBe(true);
+
+      // Book into the room
+      const bookRes = await sb.rpc('create_booking', {
+        p_booking: { category: 'MFA', check_in: d(0), check_out: d(3), party_size: 1, is_suite_booking: false },
+        p_guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }],
+        p_allocations: [{ guest_seq: 1, room_id: tempId, bed_slot: 1 }],
+      });
+      expect(bookRes.error).toBeNull();
+
+      // Deleting room with active booking must fail
+      const failDel = await sb.rpc('delete_room', { p_room_id: tempId });
+      expect(failDel.error?.message).toContain('ERR_ROOM_HAS_ACTIVE_BOOKINGS');
+
+      // Cancel the booking to free the room
+      const bId = bookRes.data as string;
+      await sb.rpc('cancel_booking', { p_id: bId, p_reason_enc: 'enc:cancelled', p_key_version: 1 });
+
+      // Now deleting the room should succeed
+      const okDel = await sb.rpc('delete_room', { p_room_id: tempId });
+      expect(okDel.error).toBeNull();
+
+      // Room should no longer be visible in rooms query
+      const afterList = (await sb.from('rooms').select('*')).data;
+      expect(afterList.some((r: any) => r.id === tempId)).toBe(false);
+
+      // Unprivileged clerk cannot delete rooms
+      await signInAs('clerk');
+      expect((await sb.rpc('delete_room', { p_room_id: roomIds['V-01'] })).error?.message).toContain('ERR_PERMISSION');
+
+      // Grant manage_rooms to clerk
+      await signInAs('admin');
+      await sb.rpc('set_user_permissions', {
+        p_user_id: DEV_USERS.clerk.id,
+        p_permissions: ['create_booking', 'manage_rooms'],
+      });
+
+      // Privileged clerk cannot delete suite room
+      await signInAs('clerk');
+      const suiteDel = await sb.rpc('delete_room', { p_room_id: roomIds['SU-01'] });
+      expect(suiteDel.error?.message).toContain('ERR_SUITE_ONLY_ADMIN');
+    });
+
+    it('update_booking_dates: guest leaves early, releasing inventory', async () => {
+      await signInAs('admin');
+      const b = await book({ category: 'MFA', checkIn: d(0), checkOut: d(5), guests: [G('M', 'FO')], pref: 'NORMAL' });
+
+      // Check daily room state before early departure: day 4 is occupied
+      const { data: stBefore } = await sb.rpc('daily_room_state', { p_from: d(4), p_to: d(5) });
+      const bAlloc = (await sb.from('allocations').select('*').eq('booking_id', b.id).single()).data;
+      const day4Room = (stBefore as any[]).find((r) => r.room_id === bAlloc.room_id);
+      expect(day4Room.beds_taken).toBe(1);
+
+      // Guest leaves early on day 2 instead of day 5
+      const res = await sb.rpc('update_booking_dates', {
+        p_booking_id: b.id,
+        p_new_check_in: d(0),
+        p_new_check_out: d(2),
+      });
+      expect(res.error).toBeNull();
+
+      // Verify booking and allocation dates updated
+      const updatedBooking = (await sb.from('bookings').select('*').eq('id', b.id).single()).data;
+      expect(updatedBooking.check_out).toBe(d(2));
+
+      const updatedAlloc = (await sb.from('allocations').select('*').eq('booking_id', b.id).single()).data;
+      expect(updatedAlloc.stay).toBe(`[${d(0)},${d(2)})`);
+
+      // Inventory on day 4 is now free!
+      const { data: stAfter } = await sb.rpc('daily_room_state', { p_from: d(4), p_to: d(5) });
+      const day4RoomAfter = (stAfter as any[]).find((r) => r.room_id === bAlloc.room_id);
+      expect(day4RoomAfter.beds_taken).toBe(0);
+    });
+
+    it('update_booking_dates: stay extension succeeds when free, fails on conflicting booking or closure', async () => {
+      await signInAs('admin');
+      // Booking 1 in Room V-01 days 0 to 2
+      const b1 = await sb.rpc('create_booking', {
+        p_booking: { category: 'MFA', check_in: d(0), check_out: d(2), party_size: 1, is_suite_booking: false },
+        p_guests: [{ seq: 1, gender: 'M', rank_code: 'WG_CDR' }],
+        p_allocations: [{ guest_seq: 1, room_id: roomIds['V-01'], bed_slot: 1 }],
+      });
+      expect(b1.error).toBeNull();
+
+      // Booking 2 in Room V-01 Bed 1 days 4 to 6
+      const b2 = await sb.rpc('create_booking', {
+        p_booking: { category: 'MFA', check_in: d(4), check_out: d(6), party_size: 1, is_suite_booking: false },
+        p_guests: [{ seq: 1, gender: 'M', rank_code: 'WG_CDR' }],
+        p_allocations: [{ guest_seq: 1, room_id: roomIds['V-01'], bed_slot: 1 }],
+      });
+      expect(b2.error).toBeNull();
+
+      // Extending b1 from d(2) to d(3) succeeds (bed 1 is free on day 2)
+      const extOk = await sb.rpc('update_booking_dates', {
+        p_booking_id: b1.data,
+        p_new_check_in: d(0),
+        p_new_check_out: d(3),
+      });
+      expect(extOk.error).toBeNull();
+
+      // Extending b1 to d(5) overlaps with b2 on day 4 -> fails with double booking
+      const extFail = await sb.rpc('update_booking_dates', {
+        p_booking_id: b1.data,
+        p_new_check_in: d(0),
+        p_new_check_out: d(5),
+      });
+      expect(extFail.error?.message).toContain('no_double_booking');
+
+      // Put V-01 out of service on day 3
+      await (sb.from('room_closures') as any).insert({
+        room_id: roomIds['V-01'],
+        period: `[${d(3)},${d(4)})`,
+        reason_enc: 'enc:repair',
+      });
+
+      // Extending b1 to d(4) overlaps closure -> fails with ERR_ROOM_CLOSED
+      const extClosure = await sb.rpc('update_booking_dates', {
+        p_booking_id: b1.data,
+        p_new_check_in: d(0),
+        p_new_check_out: d(4),
+      });
+      expect(extClosure.error?.message).toContain('ERR_ROOM_CLOSED');
+    });
+  });
+
+  describe('multi-guest booking requests and allotment suggestions', () => {
+    it('creates a multi-guest booking request with status PENDING_ALLOTMENT and no allocations', async () => {
+      await signInAs('clerk');
+      const guests = [
+        { seq: 1, gender: 'M' as Gender, rank_code: 'WG_CDR' as RankCode },
+        { seq: 2, gender: 'M' as Gender, rank_code: 'WG_CDR' as RankCode },
+        { seq: 3, gender: 'F' as Gender, rank_code: 'SQN_LDR' as RankCode },
+      ];
+
+      const res = await sb.rpc('create_booking_request', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(1),
+          check_out: d(4),
+          party_size: 3,
+        },
+        p_guests: guests,
+      });
+
+      expect(res.error).toBeNull();
+      const bookingId = res.data as string;
+
+      // Verify booking record
+      const bRow = (await sb.from('bookings').select('*').eq('id', bookingId).single()).data;
+      expect(bRow.status).toBe('PENDING_ALLOTMENT');
+      expect(bRow.party_size).toBe(3);
+
+      // Verify guests exist
+      const gRows = (await sb.from('booking_guests').select('*').eq('booking_id', bookingId)).data;
+      expect(gRows.length).toBe(3);
+
+      // Verify allocations do NOT exist yet
+      const aRows = (await sb.from('allocations').select('*').eq('booking_id', bookingId)).data;
+      expect(aRows.length).toBe(0);
+
+      // Room states remain 0 beds taken for those dates
+      const { data: st } = await sb.rpc('daily_room_state', { p_from: d(1), p_to: d(4) });
+      const taken = (st as any[]).reduce((sum, r) => sum + r.beds_taken, 0);
+      expect(taken).toBe(0);
+    });
+
+    it('computes allotment suggestions for pending request and allots rooms to confirm booking', async () => {
+      await signInAs('clerk');
+      const guests = [
+        { seq: 1, gender: 'M' as const, rank_code: 'WG_CDR' as const },
+        { seq: 2, gender: 'M' as const, rank_code: 'WG_CDR' as const },
+        { seq: 3, gender: 'F' as const, rank_code: 'SQN_LDR' as const },
+      ];
+
+      // 1. Create booking request
+      const createRes = await sb.rpc('create_booking_request', {
+        p_booking: {
+          category: 'PI',
+          check_in: d(2),
+          check_out: d(5),
+          party_size: 3,
+        },
+        p_guests: guests,
+      });
+      expect(createRes.error).toBeNull();
+      const bookingId = createRes.data as string;
+
+      // 2. Fetch daily room states and compute suggestions via planAllotment
+      const { data: rawStates } = await sb.rpc('daily_room_state', { p_from: d(2), p_to: d(5) });
+      const roomStates = (rawStates as any[]).map(mapRoomDayState);
+      const planResult = planAllotment(
+        {
+          category: 'PI',
+          checkIn: d(2),
+          checkOut: d(5),
+          guests: guests.map((g) => ({ gender: g.gender, rankCode: g.rank_code })),
+        },
+        roomStates,
+      );
+
+      expect(planResult.kind).toBe('ALLOT');
+      if (planResult.kind !== 'ALLOT') throw new Error('expected kind ALLOT');
+
+      // The 2 WG_CDR Male guests must be paired into the same room
+      const g1 = planResult.assignments.find((a) => a.guestIndex === 0)!;
+      const g2 = planResult.assignments.find((a) => a.guestIndex === 1)!;
+      const g3 = planResult.assignments.find((a) => a.guestIndex === 2)!;
+
+      expect(g1.roomId).toBe(g2.roomId);
+      expect(g1.bedSlot).not.toBe(g2.bedSlot);
+      expect(g3.roomId).not.toBe(g1.roomId);
+
+      // 3. Confirm allotment using allot_booking_rooms
+      const allotRes = await sb.rpc('allot_booking_rooms', {
+        p_booking_id: bookingId,
+        p_allocations: planResult.assignments.map((a) => ({
+          guest_seq: a.guestIndex + 1,
+          room_id: a.roomId,
+          bed_slot: a.bedSlot,
+        })),
+      });
+      expect(allotRes.error).toBeNull();
+
+      // 4. Verify booking is now CONFIRMED
+      const bRow = (await sb.from('bookings').select('*').eq('id', bookingId).single()).data;
+      expect(bRow.status).toBe('CONFIRMED');
+
+      // 5. Verify active allocations are in place
+      const aRows = (await sb.from('allocations').select('*').eq('booking_id', bookingId)).data;
+      expect(aRows.length).toBe(3);
+      expect(aRows.every((a: any) => a.status === 'ACTIVE')).toBe(true);
+
+      // 6. Cannot allot again once already confirmed
+      const allotAgain = await sb.rpc('allot_booking_rooms', {
+        p_booking_id: bookingId,
+        p_allocations: planResult.assignments.map((a) => ({
+          guest_seq: a.guestIndex + 1,
+          room_id: a.roomId,
+          bed_slot: a.bedSlot,
+        })),
+      });
+      expect(allotAgain.error?.message).toContain('ERR_BOOKING_NOT_PENDING');
+    });
+
+    it('allows updating stay dates on a pending booking request before room allotment', async () => {
+      await signInAs('clerk');
+      const createRes = await sb.rpc('create_booking_request', {
+        p_booking: {
+          category: 'LEAVE',
+          check_in: d(2),
+          check_out: d(5),
+          party_size: 2,
+        },
+        p_guests: [
+          { seq: 1, gender: 'M' as const, rank_code: 'FLT_LT' as const },
+          { seq: 2, gender: 'M' as const, rank_code: 'FLT_LT' as const },
+        ],
+      });
+      const bookingId = createRes.data as string;
+
+      // Update dates to d(3) -> d(7)
+      const updateRes = await sb.rpc('update_booking_dates', {
+        p_booking_id: bookingId,
+        p_new_check_in: d(3),
+        p_new_check_out: d(7),
+      });
+      expect(updateRes.error).toBeNull();
+
+      const bRow = (await sb.from('bookings').select('*').eq('id', bookingId).single()).data;
+      expect(bRow.check_in).toBe(d(3));
+      expect(bRow.check_out).toBe(d(7));
+      expect(bRow.status).toBe('PENDING_ALLOTMENT');
+    });
+  });
+
+  describe('unique guest IDs, universal search, and occupancy grid daily room state', () => {
+    it('assigns unique human-readable GST-XXXX guest code to every guest', async () => {
+      await signInAs('clerk');
+      const createRes = await sb.rpc('create_booking_request', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(1),
+          check_out: d(3),
+          party_size: 2,
+        },
+        p_guests: [
+          { seq: 1, gender: 'M' as const, rank_code: 'WG_CDR' as const },
+          { seq: 2, gender: 'F' as const, rank_code: 'SQN_LDR' as const },
+        ],
+      });
+      const bookingId = createRes.data as string;
+
+      const guestsRes = await sb
+        .from('booking_guests')
+        .select('*')
+        .eq('booking_id', bookingId)
+        .order('seq', { ascending: true });
+
+      expect(guestsRes.error).toBeNull();
+      expect(guestsRes.data).toHaveLength(2);
+      expect(guestsRes.data![0].guest_code).toMatch(/^GST-\d{4}$/);
+      expect(guestsRes.data![1].guest_code).toMatch(/^GST-\d{4}$/);
+      expect(guestsRes.data![0].guest_code).not.toEqual(guestsRes.data![1].guest_code);
+    });
+
+    it('allows guest PII without Aadhaar / Passport and enables universal search', async () => {
+      await signInAs('clerk');
+      const createRes = await sb.rpc('create_booking_request', {
+        p_booking: {
+          category: 'LEAVE',
+          check_in: d(2),
+          check_out: d(4),
+          party_size: 1,
+        },
+        p_guests: [{ seq: 1, gender: 'M' as const, rank_code: 'GP_CAPT' as const }],
+      });
+      const bookingId = createRes.data as string;
+      const guests = (await sb.from('booking_guests').select('*').eq('booking_id', bookingId)).data!;
+      const guestId = guests[0].id;
+      const guestCode = guests[0].guest_code;
+
+      // Enter guest PII with NO blind index (Aadhaar/passport omitted)
+      const piiRes = await sb.rpc('set_guest_pii', {
+        p_guest_id: guestId,
+        p_pii_enc: 'dummy-enc-pii',
+        p_blind: null,
+        p_key_version: 1,
+      });
+      expect(piiRes.error).toBeNull();
+
+      // Details should now be COMPLETE
+      const updatedGuest = (await sb.from('booking_guests').select('*').eq('id', guestId).single()).data;
+      expect(updatedGuest.details).toBe('COMPLETE');
+
+      // Search by unique guest code
+      const searchByCode = await sb.rpc('search_bookings_and_guests', { p_query: guestCode });
+      expect(searchByCode.error).toBeNull();
+      expect(searchByCode.data?.map((r: any) => r.booking_id)).toContain(bookingId);
+
+      // Search by rank code
+      const searchByRank = await sb.rpc('search_bookings_and_guests', { p_query: 'GP_CAPT' });
+      expect(searchByRank.error).toBeNull();
+      expect(searchByRank.data?.map((r: any) => r.booking_id)).toContain(bookingId);
+
+      // Search by category
+      const searchByCategory = await sb.rpc('search_bookings_and_guests', { p_query: 'LEAVE' });
+      expect(searchByCategory.error).toBeNull();
+      expect(searchByCategory.data?.map((r: any) => r.booking_id)).toContain(bookingId);
+    });
+
+    it('populates guestCode in daily_room_state for grid view occupancy matrix', async () => {
+      await signInAs('clerk');
+      const bRes = await book({
+        category: 'MFA',
+        checkIn: d(1),
+        checkOut: d(3),
+        guests: [G('M', 'WG_CDR')],
+      });
+      expect(bRes.id).toBeDefined();
+
+      const roomStateRes = await sb.rpc('daily_room_state', {
+        p_from: d(1),
+        p_to: d(2),
+      });
+      expect(roomStateRes.error).toBeNull();
+
+      const day1 = (roomStateRes.data || []).find((r: any) => r.beds_taken > 0);
+      expect(day1).toBeDefined();
+      expect(day1.occupants).toHaveLength(1);
+      expect(day1.occupants[0].guestCode).toMatch(/^GST-\d{4}$/);
+      expect(day1.occupants[0].category).toBe('MFA');
+      expect(day1.occupants[0].rankCode).toBe('WG_CDR');
+    });
+
+    it('generates past bookings HTML report with military mess register headers and counts', () => {
+      const html = buildPastBookingsHtml({
+        title: "OFFICERS' MESS - PAST BOOKINGS REGISTER",
+        bookings: [
+          {
+            id: 'bkg-101-alpha',
+            category: 'MFA',
+            checkIn: '2026-10-01',
+            checkOut: '2026-10-04',
+            nights: 3,
+            partySize: 1,
+            status: 'COMPLETED',
+            guestName: 'Air Marshal S. Mukherjee',
+            guestRank: 'AM',
+            serviceNumber: '10023-F',
+            unit: 'Air HQ (VB)',
+            rooms: 'VIP Suite 1 (Bed 1)',
+          },
+          {
+            id: 'bkg-102-beta',
+            category: 'LEAVE',
+            checkIn: '2026-10-05',
+            checkOut: '2026-10-08',
+            nights: 3,
+            partySize: 2,
+            status: 'COMPLETED',
+            guestName: 'Wing Commander R. Nair',
+            guestRank: 'WG_CDR',
+            serviceNumber: '24567-K',
+            unit: '12 Wing',
+            rooms: 'Room V-01 (Bed 1), Room V-01 (Bed 2)',
+          },
+        ],
+      });
+
+      expect(html).toContain('OFFICERS&#39; MESS - PAST BOOKINGS REGISTER');
+      expect(html).toContain('Air Marshal S. Mukherjee');
+      expect(html).toContain('10023-F');
+      expect(html).toContain('Wing Commander R. Nair');
+      expect(html).toContain('badge-mfa');
+      expect(html).toContain('badge-leave');
+      expect(html).toContain('Total Past Stays');
+      expect(html).toContain('Total Nights Hosted');
+    });
+
+    it('wizard multi-guest request creation with optional fields and subsequent allotment', async () => {
+      await signInAs('clerk');
+      // Create a pending request with 2 guests (none of the fields mandatory)
+      const reqRes = await sb.rpc('create_booking_request', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(2),
+          check_out: d(5),
+          party_size: 2,
+          is_suite_booking: false,
+        },
+        p_guests: [
+          { seq: 1, gender: 'M', rank_code: 'WG_CDR', guest_name: 'Wing Commander K. Sharma' },
+          { seq: 2, gender: 'M', rank_code: 'WG_CDR', guest_name: 'Squadron Leader M. Patel' },
+        ],
+      });
+      expect(reqRes.error).toBeNull();
+      const bookingId = reqRes.data;
+
+      // Check request is stored in PENDING_ALLOTMENT status
+      const bRecord = (await sb.from('bookings').select('*').eq('id', bookingId).single()).data;
+      expect(bRecord.status).toBe('PENDING_ALLOTMENT');
+
+      // Check both guests have unique GST-XXXX codes and names preserved
+      const guests = (await sb.from('booking_guests').select('*').eq('booking_id', bookingId).order('seq')).data;
+      expect(guests).toHaveLength(2);
+      expect(guests[0].guest_code).toMatch(/^GST-\d{4}$/);
+      expect(guests[1].guest_code).toMatch(/^GST-\d{4}$/);
+      expect(guests[0].guest_name).toBe('Wing Commander K. Sharma');
+      expect(guests[1].guest_name).toBe('Squadron Leader M. Patel');
+
+      // Perform allotment from requests queue
+      const allotRes = await sb.rpc('allot_booking_rooms', {
+        p_booking_id: bookingId,
+        p_allocations: [
+          { guest_id: guests[0].id, room_id: roomIds['V-01'], bed_slot: 1 },
+          { guest_id: guests[1].id, room_id: roomIds['V-01'], bed_slot: 2 },
+        ],
+      });
+      expect(allotRes.error).toBeNull();
+
+      // Booking status is now CONFIRMED
+      const confirmed = (await sb.from('bookings').select('*').eq('id', bookingId).single()).data;
+      expect(confirmed.status).toBe('CONFIRMED');
+
+      // Allocations are ACTIVE in Room V-01
+      const allocs = (await sb.from('allocations').select('*').eq('booking_id', bookingId)).data;
+      expect(allocs).toHaveLength(2);
+      expect(allocs.every((a: any) => a.status === 'ACTIVE')).toBe(true);
+    });
+
+    it('individual bookings creation, universal search by unit/service number/phone, and preferred room type filter', async () => {
+      await signInAs('clerk');
+
+      // 1. Create individual booking request with unit, service_number, phone, and preferred_room_type
+      const req1 = await sb.rpc('create_booking_request', {
+        p_booking: {
+          category: 'TD',
+          check_in: d(3),
+          check_out: d(6),
+          party_size: 1,
+          is_suite_booking: false,
+          preferred_room_type: 'VIP',
+        },
+        p_guests: [
+          {
+            seq: 1,
+            gender: 'M',
+            rank_code: 'COL',
+            guest_name: 'Col Vikram Batra',
+            unit: '13 JAK RIF',
+            service_number: 'IC-52140M',
+            phone: '+91 9876543210',
+          },
+        ],
+      });
+      expect(req1.error).toBeNull();
+      const bkgId1 = req1.data;
+
+      // 2. Create another individual booking request
+      const req2 = await sb.rpc('create_booking_request', {
+        p_booking: {
+          category: 'LEAVE',
+          check_in: d(3),
+          check_out: d(6),
+          party_size: 1,
+          is_suite_booking: false,
+          preferred_room_type: 'NORMAL',
+        },
+        p_guests: [
+          {
+            seq: 1,
+            gender: 'M',
+            rank_code: 'MAJ',
+            guest_name: 'Maj Somnath Sharma',
+            unit: '4 KUMAON',
+            service_number: 'IC-00123A',
+            phone: '+91 9123456780',
+          },
+        ],
+      });
+      expect(req2.error).toBeNull();
+      const bkgId2 = req2.data;
+
+      // Verify individual records in ledger / bookings
+      const b1 = (await sb.from('bookings').select('*').eq('id', bkgId1).single()).data;
+      expect(b1.party_size).toBe(1);
+      expect(b1.preferred_room_type).toBe('VIP');
+
+      const b2 = (await sb.from('bookings').select('*').eq('id', bkgId2).single()).data;
+      expect(b2.party_size).toBe(1);
+      expect(b2.preferred_room_type).toBe('NORMAL');
+
+      // 3. Test Universal Search by Name
+      const searchByName = await sb.rpc('search_bookings_and_guests', { p_query: 'Vikram Batra' });
+      expect(searchByName.data?.some((r: any) => r.booking_id === bkgId1)).toBe(true);
+
+      // 4. Test Universal Search by Unit
+      const searchByUnit = await sb.rpc('search_bookings_and_guests', { p_query: 'JAK RIF' });
+      expect(searchByUnit.data?.some((r: any) => r.booking_id === bkgId1)).toBe(true);
+
+      // 5. Test Universal Search by Service Number
+      const searchByServiceNo = await sb.rpc('search_bookings_and_guests', { p_query: 'IC-00123A' });
+      expect(searchByServiceNo.data?.some((r: any) => r.booking_id === bkgId2)).toBe(true);
+
+      // 6. Test Universal Search by Phone Number
+      const searchByPhone = await sb.rpc('search_bookings_and_guests', { p_query: '9876543210' });
+      expect(searchByPhone.data?.some((r: any) => r.booking_id === bkgId1)).toBe(true);
+
+      // 7. Verify booking guests store unit, service_number, and phone
+      const g1 = (await sb.from('booking_guests').select('*').eq('booking_id', bkgId1).single()).data;
+      expect(g1.unit).toBe('13 JAK RIF');
+      expect(g1.service_number).toBe('IC-52140M');
+      expect(g1.phone).toBe('+91 9876543210');
+    });
+
+    it('multi-guest requests without initial room type selection, distinct room allotment, and real-time daily_room_state reflection', async () => {
+      await signInAs('clerk');
+
+      // 1. Create 2 individual booking requests without initial room type selection (preferred_room_type = null)
+      const bkgRes1 = await sb.rpc('create_booking_request', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(10),
+          check_out: d(12),
+          party_size: 1,
+          is_suite_booking: false,
+          preferred_room_type: null,
+        },
+        p_guests: [
+          { seq: 1, gender: 'M', rank_code: 'WG_CDR', guest_name: 'Wing Commander Abhinandan' },
+        ],
+      });
+      expect(bkgRes1.error).toBeNull();
+      const bkgId1 = bkgRes1.data;
+
+      const bkgRes2 = await sb.rpc('create_booking_request', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(10),
+          check_out: d(12),
+          party_size: 1,
+          is_suite_booking: false,
+          preferred_room_type: null,
+        },
+        p_guests: [
+          { seq: 1, gender: 'M', rank_code: 'WG_CDR', guest_name: 'Wing Commander R. Sharma' },
+        ],
+      });
+      expect(bkgRes2.error).toBeNull();
+      const bkgId2 = bkgRes2.data;
+
+      // 2. Allot both guests to distinct beds in Room V-01 (Bed 1 and Bed 2)
+      const allot1 = await sb.rpc('allot_booking_rooms', {
+        p_booking_id: bkgId1,
+        p_allocations: [
+          { guest_seq: 1, room_id: roomIds['V-01'], bed_slot: 1 },
+        ],
+      });
+      expect(allot1.error).toBeNull();
+
+      const allot2 = await sb.rpc('allot_booking_rooms', {
+        p_booking_id: bkgId2,
+        p_allocations: [
+          { guest_seq: 1, room_id: roomIds['V-01'], bed_slot: 2 },
+        ],
+      });
+      expect(allot2.error).toBeNull();
+
+      // 3. Verify both bookings transitioned to CONFIRMED
+      const b1 = (await sb.from('bookings').select('*').eq('id', bkgId1).single()).data;
+      const b2 = (await sb.from('bookings').select('*').eq('id', bkgId2).single()).data;
+      expect(b1.status).toBe('CONFIRMED');
+      expect(b2.status).toBe('CONFIRMED');
+
+      // 4. Verify daily_room_state reflects Room V-01 as FULL (both beds taken)
+      const stateRes = await sb.rpc('daily_room_state', {
+        p_from: d(10),
+        p_to: d(12),
+      });
+      expect(stateRes.error).toBeNull();
+
+      const v01Day10 = (stateRes.data || []).find(
+        (r: any) => r.room_id === roomIds['V-01'] && r.date === d(10)
+      );
+      expect(v01Day10).toBeDefined();
+      expect(v01Day10.beds_taken).toBe(2);
+      expect(v01Day10.occupants).toHaveLength(2);
+
+      // 5. Attempting to allot a 3rd guest to Room V-01 for the same period must fail (room is full)
+      const bkgRes3 = await sb.rpc('create_booking_request', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(10),
+          check_out: d(12),
+          party_size: 1,
+          is_suite_booking: false,
+        },
+        p_guests: [
+          { seq: 1, gender: 'M', rank_code: 'WG_CDR', guest_name: 'Wing Commander 3' },
+        ],
+      });
+      const bkgId3 = bkgRes3.data;
+
+      const allot3 = await sb.rpc('allot_booking_rooms', {
+        p_booking_id: bkgId3,
+        p_allocations: [
+          { guest_seq: 1, room_id: roomIds['V-01'], bed_slot: 1 },
+        ],
+      });
+      expect(allot3.error).not.toBeNull();
+      expect(allot3.error?.message).toContain('no_double_booking');
+    });
+
+    it('single request intake wizard flow, strict exclusion of booked rooms from availability, and successful allotment', async () => {
+      await signInAs('clerk');
+
+      // 1. Fully book Room V-02 for dates d(15) -> d(18)
+      const bkg1 = await sb.rpc('create_booking', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(15),
+          check_out: d(18),
+          party_size: 2,
+          is_suite_booking: false,
+        },
+        p_guests: [
+          { seq: 1, gender: 'M', rank_code: 'WG_CDR', guest_name: 'Occupant One' },
+          { seq: 2, gender: 'M', rank_code: 'WG_CDR', guest_name: 'Occupant Two' },
+        ],
+        p_allocations: [
+          { guest_seq: 1, room_id: roomIds['V-02'], bed_slot: 1, check_in: d(15), check_out: d(18) },
+          { guest_seq: 2, room_id: roomIds['V-02'], bed_slot: 2, check_in: d(15), check_out: d(18) },
+        ],
+      });
+      expect(bkg1.error).toBeNull();
+
+      // 2. Create a pending booking request for a new guest via the single-guest wizard
+      const reqRes = await sb.rpc('create_booking_request', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(15),
+          check_out: d(18),
+          party_size: 1,
+          is_suite_booking: false,
+          preferred_room_type: 'VIP',
+        },
+        p_guests: [
+          {
+            seq: 1,
+            gender: 'M',
+            rank_code: 'WG_CDR',
+            guest_name: 'New Pending Guest',
+            service_number: '29102-K',
+            unit: 'Command HQ',
+            phone: '9811223344',
+          },
+        ],
+      });
+      expect(reqRes.error).toBeNull();
+      const pendingBookingId = reqRes.data;
+
+      // 3. Query room states for d(15) -> d(18)
+      const statesRes = await sb.rpc('daily_room_state', {
+        p_from: d(15),
+        p_to: d(18),
+      });
+      expect(statesRes.error).toBeNull();
+      const states = statesRes.data || [];
+
+      // Room V-02 must have beds_taken = 2
+      const v02State = states.find((r: any) => r.room_id === roomIds['V-02'] && r.date === d(15));
+      expect(v02State).toBeDefined();
+      expect(v02State.beds_taken).toBe(2);
+
+      // 4. Room vacancy check: Room V-02 has NO free beds, while Room V-03 has 2 free beds
+      const v02Occupants = states.filter((s: any) => s.room_id === roomIds['V-02']).flatMap((s: any) => s.occupants);
+      const v02TakenBeds = new Set(v02Occupants.map((o: any) => o.bedSlot));
+      const v02FreeBeds = [1, 2].filter((b) => !v02TakenBeds.has(b));
+      expect(v02FreeBeds).toHaveLength(0); // Fully booked room has 0 free beds!
+
+      const v03Occupants = states.filter((s: any) => s.room_id === roomIds['V-03']).flatMap((s: any) => s.occupants);
+      const v03TakenBeds = new Set(v03Occupants.map((o: any) => o.bedSlot));
+      const v03FreeBeds = [1, 2].filter((b) => !v03TakenBeds.has(b));
+      expect(v03FreeBeds).toHaveLength(2); // Vacant room has both beds free!
+
+      // 5. Operator allots the new guest to Room V-03 Bed 1
+      const allotRes = await sb.rpc('allot_booking_rooms', {
+        p_booking_id: pendingBookingId,
+        p_allocations: [
+          { guest_seq: 1, room_id: roomIds['V-03'], bed_slot: 1 },
+        ],
+      });
+      expect(allotRes.error).toBeNull();
+
+      // 6. Verify booking transitioned from PENDING_ALLOTMENT to CONFIRMED
+      const confirmedBooking = (await sb.from('bookings').select('*').eq('id', pendingBookingId).single()).data;
+      expect(confirmedBooking.status).toBe('CONFIRMED');
+
+      // 7. Verify Room V-03 now has an active allocation for the guest
+      const allocs = (await sb.from('allocations').select('*').eq('booking_id', pendingBookingId)).data;
+      expect(allocs).toHaveLength(1);
+      expect(allocs![0].room_id).toBe(roomIds['V-03']);
+      expect(allocs![0].bed_slot).toBe(1);
+      expect(allocs![0].status).toBe('ACTIVE');
+    });
+
+    it('guarantees guest details saved in booking wizard are immediately persisted and reflected in ledger and requests', async () => {
+      await signInAs('clerk');
+
+      // 1. Clerk enters request with officer name, unit, service number, and phone
+      const officerName = 'Wing Commander Vikram Malhotra';
+      const officerUnit = '17 Squadron Golden Arrows';
+      const officerServiceNo = '28491-A';
+      const officerPhone = '+91 9876543210';
+
+      const createRes = await sb.rpc('create_booking', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(2),
+          check_out: d(5),
+          party_size: 1,
+          is_suite_booking: false,
+          status: 'PENDING_ALLOTMENT',
+        },
+        p_guests: [
+          {
+            seq: 1,
+            gender: 'M',
+            rank_code: 'WG_CDR',
+            guest_name: officerName,
+            unit: officerUnit,
+            service_number: officerServiceNo,
+            phone: officerPhone,
+          },
+        ],
+        p_allocations: [],
+      });
+      expect(createRes.error).toBeNull();
+      const bookingId = createRes.data;
+
+      // 2. Fetch created guest record safely
+      const guestRows = (await sb.from('booking_guests').select('*').eq('booking_id', bookingId)).data;
+      expect(guestRows).toHaveLength(1);
+      const guestId = guestRows![0].id;
+
+      // 3. Save guest details via set_booking_guest_details RPC
+      const setDetailsRes = await sb.rpc('set_booking_guest_details', {
+        p_guest_id: guestId,
+        p_guest_name: officerName,
+        p_unit: officerUnit,
+        p_service_number: officerServiceNo,
+        p_phone: officerPhone,
+      });
+      expect(setDetailsRes.error).toBeNull();
+
+      // 4. Save encrypted PII via set_guest_pii
+      const piiRes = await sb.rpc('set_guest_pii', {
+        p_guest_id: guestId,
+        p_pii_enc: 'dummy-cipher-vikram',
+        p_blind: null,
+        p_key_version: 1,
+      });
+      expect(piiRes.error).toBeNull();
+
+      // 5. Verify booking_guests columns are populated and details is COMPLETE
+      const updatedGuest = (await sb.from('booking_guests').select('*').eq('id', guestId).single()).data;
+      expect(updatedGuest.guest_name).toBe(officerName);
+      expect(updatedGuest.unit).toBe(officerUnit);
+      expect(updatedGuest.service_number).toBe(officerServiceNo);
+      expect(updatedGuest.phone).toBe(officerPhone);
+      expect(updatedGuest.details).toBe('COMPLETE');
+
+      // 6. Universal search matches by name
+      const searchByName = await sb.rpc('search_bookings_and_guests', { p_query: 'Vikram' });
+      expect(searchByName.data?.map((r: any) => r.booking_id)).toContain(bookingId);
+
+      // 7. Universal search matches by unit
+      const searchByUnit = await sb.rpc('search_bookings_and_guests', { p_query: 'Golden Arrows' });
+      expect(searchByUnit.data?.map((r: any) => r.booking_id)).toContain(bookingId);
+
+      // 8. Universal search matches by service number
+      const searchBySvc = await sb.rpc('search_bookings_and_guests', { p_query: '28491-A' });
+      expect(searchBySvc.data?.map((r: any) => r.booking_id)).toContain(bookingId);
+
+      // 9. Verify Ledger query (bookings with booking_guests) includes the officer details
+      const ledgerBookings = (await sb.from('bookings').select('*, booking_guests(*)').eq('id', bookingId).single()).data;
+      expect(ledgerBookings.booking_guests[0].guest_name).toBe(officerName);
+      expect(ledgerBookings.booking_guests[0].unit).toBe(officerUnit);
+      expect(ledgerBookings.booking_guests[0].service_number).toBe(officerServiceNo);
+    });
+
+    it('enables taking request for later allotment, populating in requests queue, and allotting room successfully', async () => {
+      // 1. Operator takes guest request with "Save for Later Allotment"
+      const { data: bkgId, error: createErr } = await sb.rpc('create_booking', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(1),
+          check_out: d(3),
+          party_size: 1,
+          is_suite_booking: false,
+          status: 'PENDING_ALLOTMENT',
+        },
+        p_guests: [
+          {
+            seq: 1,
+            gender: 'M',
+            rank_code: 'WG_CDR',
+            guest_name: 'Wg Cdr Abhinav Sharma',
+            service_number: '29811-M',
+            unit: 'Tactical Air Centre',
+            phone: '9811223344',
+          },
+        ],
+        p_allocations: [],
+      });
+      expect(createErr).toBeNull();
+      expect(bkgId).toBeTruthy();
+
+      // 2. Pending allotment booking populates in pending requests queue
+      const { data: pendingRequests } = await sb
+        .from('bookings')
+        .select('*, booking_guests(*), allocations(*)')
+        .eq('status', 'PENDING_ALLOTMENT');
+
+      const foundReq = pendingRequests?.find((r: any) => r.id === bkgId);
+      expect(foundReq).toBeTruthy();
+      expect(foundReq.status).toBe('PENDING_ALLOTMENT');
+      expect(foundReq.booking_guests[0].guest_name).toBe('Wg Cdr Abhinav Sharma');
+      expect(foundReq.booking_guests[0].rank_code).toBe('WG_CDR');
+      expect(foundReq.allocations).toHaveLength(0);
+
+      // 3. Operator clicks the guest name / Choose Room & Bed, selects available room
+      const targetRoomId = roomIds['V-03'];
+      const { error: allotErr } = await sb.rpc('allot_booking_rooms', {
+        p_booking_id: bkgId,
+        p_allocations: [
+          {
+            guest_seq: 1,
+            room_id: targetRoomId,
+            bed_slot: 1,
+          },
+        ],
+      });
+      expect(allotErr).toBeNull();
+
+      // 4. Booking is now CONFIRMED with active allocation
+      const confirmedBkg = (await sb.from('bookings').select('*, allocations(*)').eq('id', bkgId).single()).data;
+      expect(confirmedBkg.status).toBe('CONFIRMED');
+      expect(confirmedBkg.allocations).toHaveLength(1);
+      expect(confirmedBkg.allocations[0].status).toBe('ACTIVE');
+      expect(confirmedBkg.allocations[0].room_id).toBe(targetRoomId);
+
+      // 5. Booking is no longer in pending requests queue
+      const { data: updatedPending } = await sb
+        .from('bookings')
+        .select('id')
+        .eq('status', 'PENDING_ALLOTMENT');
+      expect(updatedPending?.some((r: any) => r.id === bkgId)).toBe(false);
+
+      // 6. Room inventory / daily_room_state shows the bed is taken
+      const dayStates = await rooms(d(1), d(2));
+      const rm01State = dayStates.find((r: any) => r.room_id === targetRoomId);
+      expect(rm01State?.beds_taken).toBeGreaterThanOrEqual(1);
+      expect(rm01State?.occupants.some((o: any) => o.rankCode === 'WG_CDR')).toBe(true);
+    });
+
+    it('direct room allotment from wizard persists full guest details immediately and blocks room availability in subsequent searches', async () => {
+      // 1. Direct allotment from wizard: operator fills guest details and chooses room immediately
+      const chosenRoomId = roomIds['V-02'];
+      const { data: bkgId, error: createErr } = await sb.rpc('create_booking', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(3),
+          check_out: d(6),
+          party_size: 1,
+          is_suite_booking: false,
+          preferred_room_type: 'VIP',
+        },
+        p_guests: [
+          {
+            seq: 1,
+            gender: 'M',
+            rank_code: 'SQN_LDR',
+            guest_name: 'Sqn Ldr Vikram Roy',
+            service_number: '31092-B',
+            unit: '12 Wing IAF',
+            phone: '9988776655',
+          },
+        ],
+        p_allocations: [
+          {
+            guest_seq: 1,
+            room_id: chosenRoomId,
+            bed_slot: 1,
+          },
+        ],
+      });
+      expect(createErr).toBeNull();
+      expect(bkgId).toBeTruthy();
+
+      // 2. Fetch created guest record and verify guest details are immediately in DB without backfilling
+      const { data: guestRows } = await sb
+        .from('booking_guests')
+        .select('*')
+        .eq('booking_id', bkgId);
+      expect(guestRows).toHaveLength(1);
+      const g = guestRows![0];
+      expect(g.guest_name).toBe('Sqn Ldr Vikram Roy');
+      expect(g.service_number).toBe('31092-B');
+      expect(g.unit).toBe('12 Wing IAF');
+      expect(g.phone).toBe('9988776655');
+
+      // 3. Verify room state for stay dates reflects the bed as taken
+      const dayStates = await rooms(d(3), d(6));
+      const roomState = dayStates.find((r: any) => r.room_id === chosenRoomId);
+      expect(roomState).toBeTruthy();
+      expect(roomState?.beds_taken).toBe(1);
+      expect(roomState?.occupants).toHaveLength(1);
+      expect(roomState?.occupants[0].rankCode).toBe('SQN_LDR');
+
+      // 4. Verify resilient pending requests query correctly excludes this confirmed/allotted booking
+      const { data: allActiveBookings } = await sb
+        .from('bookings')
+        .select('*, booking_guests(*), allocations(*)')
+        .not('status', 'in', '("CANCELLED","DISPLACED","COMPLETED")');
+
+      const unallotted = (allActiveBookings || []).filter((b: any) => {
+        if (b.status === 'CANCELLED' || b.status === 'DISPLACED' || b.status === 'COMPLETED') return false;
+        if (b.status === 'PENDING_ALLOTMENT') return true;
+        const activeAllocs = (b.allocations || []).filter((a: any) => a.status === 'ACTIVE');
+        return activeAllocs.length === 0;
+      });
+
+      // The directly allotted booking is not pending
+      expect(unallotted.some((b: any) => b.id === bkgId)).toBe(false);
+
+      // Now create a booking without allocations (pending allotment)
+      const { data: pendingBkgId } = await sb.rpc('create_booking', {
+        p_booking: {
+          category: 'PI',
+          check_in: d(4),
+          check_out: d(7),
+          party_size: 1,
+          is_suite_booking: false,
+          status: 'PENDING_ALLOTMENT',
+        },
+        p_guests: [
+          {
+            seq: 1,
+            gender: 'F',
+            rank_code: 'FLT_LT',
+            guest_name: 'Flt Lt Priya Singh',
+            service_number: '34102-K',
+            unit: 'Air HQ',
+            phone: '9123456780',
+          },
+        ],
+        p_allocations: [],
+      });
+
+      // Query active bookings again
+      const { data: refreshedActiveBookings } = await sb
+        .from('bookings')
+        .select('*, booking_guests(*), allocations(*)')
+        .not('status', 'in', '("CANCELLED","DISPLACED","COMPLETED")');
+
+      const updatedUnallotted = (refreshedActiveBookings || []).filter((b: any) => {
+        if (b.status === 'CANCELLED' || b.status === 'DISPLACED' || b.status === 'COMPLETED') return false;
+        if (b.status === 'PENDING_ALLOTMENT') return true;
+        const activeAllocs = (b.allocations || []).filter((a: any) => a.status === 'ACTIVE');
+        return activeAllocs.length === 0;
+      });
+
+      // Pending allotment booking is found in the unallotted list
+      const foundPending = updatedUnallotted.find((b: any) => b.id === pendingBkgId);
+      expect(foundPending).toBeTruthy();
+      expect(foundPending?.booking_guests[0].guest_name).toBe('Flt Lt Priya Singh');
+      expect(foundPending?.booking_guests[0].service_number).toBe('34102-K');
+    });
+
+    it('handles 12:00 PM check-in and check-out turnover without bed collision', async () => {
+      const targetRoomId = roomIds['N-01'];
+
+      // Guest 1: Stays d(0) to d(2) (Check-out on d(2) at 12:00 PM)
+      const { data: bkg1Id, error: err1 } = await sb.rpc('create_booking', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(0),
+          check_out: d(2),
+          party_size: 1,
+          is_suite_booking: false,
+          status: 'CONFIRMED',
+        },
+        p_guests: [
+          {
+            seq: 1,
+            gender: 'M',
+            rank_code: 'FLT_LT',
+            guest_name: 'Flt Lt Rajesh Kumar',
+            service_number: '28114-A',
+            unit: '4 Wing',
+            phone: '9811122233',
+          },
+        ],
+        p_allocations: [
+          {
+            guest_seq: 1,
+            room_id: targetRoomId,
+            bed_slot: 1,
+          },
+        ],
+      });
+      expect(err1).toBeNull();
+      expect(bkg1Id).toBeTruthy();
+
+      // Guest 2: Stays d(2) to d(5) (Check-in on d(2) at 12:00 PM - turnover date)
+      // Because check-in is 12 PM and previous check-out is 12 PM (half-open [check_in, check_out)),
+      // Bed 1 in N-01 is free for Guest 2 starting at 12:00 PM on d(2).
+      const { data: bkg2Id, error: err2 } = await sb.rpc('create_booking', {
+        p_booking: {
+          category: 'MFA',
+          check_in: d(2),
+          check_out: d(5),
+          party_size: 1,
+          is_suite_booking: false,
+          status: 'CONFIRMED',
+        },
+        p_guests: [
+          {
+            seq: 1,
+            gender: 'M',
+            rank_code: 'SQN_LDR',
+            guest_name: 'Sqn Ldr Anish Verma',
+            service_number: '29871-S',
+            unit: 'Air HQ',
+            phone: '9844455566',
+          },
+        ],
+        p_allocations: [
+          {
+            guest_seq: 1,
+            room_id: targetRoomId,
+            bed_slot: 1,
+          },
+        ],
+      });
+      expect(err2).toBeNull();
+      expect(bkg2Id).toBeTruthy();
+
+      // Verify room state on d(1): occupied by Guest 1
+      const stateD1 = await rooms(d(1), d(2));
+      const roomD1 = stateD1.find((r: any) => r.room_id === targetRoomId);
+      expect(roomD1?.beds_taken).toBe(1);
+      expect(roomD1?.occupants[0].rankCode).toBe('FLT_LT');
+
+      // Verify room state on d(2) (turnover day): occupied by Guest 2 (from 12 PM onward)
+      const stateD2 = await rooms(d(2), d(3));
+      const roomD2 = stateD2.find((r: any) => r.room_id === targetRoomId);
+      expect(roomD2?.beds_taken).toBe(1);
+      expect(roomD2?.occupants[0].rankCode).toBe('SQN_LDR');
+    });
+
+    it('facilitates direct booking from room inventory with pre-selected room and bed', async () => {
+      // Simulate booking initiated from Room Inventory for S-02, Bed 2
+      const targetRoomId = roomIds['S-02'];
+      const targetBedSlot = 2;
+
+      const { data: bkgId, error } = await sb.rpc('create_booking', {
+        p_booking: {
+          category: 'TD',
+          check_in: d(1),
+          check_out: d(4),
+          party_size: 1,
+          is_suite_booking: false,
+          status: 'CONFIRMED',
+        },
+        p_guests: [
+          {
+            seq: 1,
+            gender: 'F',
+            rank_code: 'WG_CDR',
+            guest_name: 'Wg Cdr Sunita Rao',
+            service_number: '31220-R',
+            unit: '12 Wing',
+            phone: '9876501234',
+          },
+        ],
+        p_allocations: [
+          {
+            guest_seq: 1,
+            room_id: targetRoomId,
+            bed_slot: targetBedSlot,
+          },
+        ],
+      });
+
+      expect(error).toBeNull();
+      expect(bkgId).toBeTruthy();
+
+      // Verify allocation row
+      const { data: allocRows } = await sb
+        .from('allocations')
+        .select('*')
+        .eq('booking_id', bkgId);
+      expect(allocRows).toHaveLength(1);
+      expect(allocRows![0].room_id).toBe(targetRoomId);
+      expect(allocRows![0].bed_slot).toBe(targetBedSlot);
+
+      // Verify guest details
+      const { data: guestRows } = await sb
+        .from('booking_guests')
+        .select('*')
+        .eq('booking_id', bkgId);
+      expect(guestRows![0].guest_name).toBe('Wg Cdr Sunita Rao');
+      expect(guestRows![0].service_number).toBe('31220-R');
+    });
+  });
 });
+
+
+

@@ -2,12 +2,6 @@ import React from 'react';
 import { Redirect, Stack } from 'expo-router';
 import { useSessionStore } from '../../src/state/sessionStore';
 import { useAuthStore } from '../../src/state/authStore';
-import { useRealtimeSync } from '../../src/features/realtime/useRealtimeSync';
-
-function RealtimeSync() {
-  useRealtimeSync();
-  return null;
-}
 
 export default function AppLayout() {
   const isUnlocked = useSessionStore((s) => s.isUnlocked);
@@ -22,10 +16,5 @@ export default function AppLayout() {
     return <Redirect href="/(auth)/unlock" />;
   }
 
-  return (
-    <>
-      <RealtimeSync />
-      <Stack screenOptions={{ headerShown: false }} />
-    </>
-  );
+  return <Stack screenOptions={{ headerShown: false }} />;
 }

@@ -7,6 +7,9 @@ import { layout, typography } from '../tokens';
 import { NAV_ITEMS, isNavActive } from '../navigation';
 import { Icon, IconName } from './Icon';
 
+import { useQuery } from '@tanstack/react-query';
+import { supabase } from '../../lib/supabase';
+
 interface TabItem {
   label: string;
   icon: IconName;
@@ -15,9 +18,9 @@ interface TabItem {
 
 const TABS: TabItem[] = [
   { label: 'Rooms', icon: 'bed', path: '/' },
-  { label: 'Book', icon: 'plus', path: '/bookings/new' },
+  { label: 'New', icon: 'plus', path: '/bookings/new' },
+  { label: 'Requests', icon: 'clipboard', path: '/requests' },
   { label: 'Ledger', icon: 'ledger', path: '/bookings' },
-  { label: 'Reports', icon: 'chart', path: '/reports' },
   { label: 'More', icon: 'menu', path: '/more' },
 ];
 
@@ -30,6 +33,26 @@ export const TabBar: React.FC = () => {
   const pathname = usePathname();
   const insets = useSafeAreaInsets();
   const colors = useThemeStore((s) => s.colors);
+
+  // Live count of pending requests for the badge
+  const { data: pendingCount } = useQuery({
+    queryKey: ['tabbar_pending_requests_count'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('bookings')
+        .select('id, status, allocations(status)')
+        .not('status', 'in', '("CANCELLED","DISPLACED","COMPLETED")');
+      if (error) return 0;
+      const unallotted = (data || []).filter((b: any) => {
+        if (b.status === 'CANCELLED' || b.status === 'DISPLACED' || b.status === 'COMPLETED') return false;
+        if (b.status === 'PENDING_ALLOTMENT') return true;
+        const activeAllocs = (b.allocations || []).filter((a: any) => a.status === 'ACTIVE');
+        return activeAllocs.length === 0;
+      });
+      return unallotted.length;
+    },
+    refetchInterval: 5000,
+  });
 
   return (
     <View
@@ -65,12 +88,21 @@ export const TabBar: React.FC = () => {
             {isActive ? (
               <View style={[styles.activeIndicator, { backgroundColor: colors.saffron }]} />
             ) : null}
-            <Icon
-              name={tab.icon}
-              size={22}
-              color={isActive ? colors.navy : colors.muted}
-              strokeWidth={isActive ? 2 : 1.75}
-            />
+            <View style={{ position: 'relative' }}>
+              <Icon
+                name={tab.icon}
+                size={22}
+                color={isActive ? colors.navy : colors.muted}
+                strokeWidth={isActive ? 2 : 1.75}
+              />
+              {tab.path === '/requests' && (pendingCount ?? 0) > 0 ? (
+                <View style={[styles.badgeContainer, { backgroundColor: colors.saffron }]}>
+                  <Text style={styles.badgeText}>
+                    {(pendingCount ?? 0) > 99 ? '99+' : pendingCount}
+                  </Text>
+                </View>
+              ) : null}
+            </View>
             <Text
               numberOfLines={1}
               style={[
@@ -116,5 +148,21 @@ const styles = StyleSheet.create({
   tabLabel: {
     fontSize: 11,
     marginTop: 3,
+  },
+  badgeContainer: {
+    position: 'absolute',
+    top: -4,
+    right: -10,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+  },
+  badgeText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: 'bold',
   },
 });

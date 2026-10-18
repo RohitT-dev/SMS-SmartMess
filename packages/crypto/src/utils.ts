@@ -3,17 +3,50 @@
  * Pure TypeScript, zero external dependencies, compatible with Hermes, Web, and Node.
  */
 
+let customRandomBytesProvider: ((length: number) => Uint8Array) | null = null;
+
+export function setRandomBytesProvider(provider: ((length: number) => Uint8Array) | null): void {
+  customRandomBytesProvider = provider;
+}
+
 export function getRandomBytes(length: number): Uint8Array {
+  if (customRandomBytesProvider) {
+    return customRandomBytesProvider(length);
+  }
+
   const bytes = new Uint8Array(length);
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
     crypto.getRandomValues(bytes);
-  } else if (typeof globalThis !== 'undefined' && globalThis.crypto?.getRandomValues) {
+    return bytes;
+  }
+  if (typeof globalThis !== 'undefined' && typeof globalThis.crypto?.getRandomValues === 'function') {
     globalThis.crypto.getRandomValues(bytes);
-  } else {
-    // Fallback for environments where crypto is not on global
-    const nodeCrypto = eval("require('crypto')");
-    const buf = nodeCrypto.randomBytes(length);
-    bytes.set(buf);
+    return bytes;
+  }
+
+  // Safe Node.js fallback without eval("require('crypto')") which breaks Hermes
+  try {
+    const nodeRequire =
+      typeof require === 'function'
+        ? require
+        : typeof globalThis !== 'undefined' && typeof (globalThis as any).require === 'function'
+          ? (globalThis as any).require
+          : null;
+    if (nodeRequire) {
+      const nodeCrypto = nodeRequire('crypto');
+      if (nodeCrypto && typeof nodeCrypto.randomBytes === 'function') {
+        const buf = nodeCrypto.randomBytes(length);
+        bytes.set(buf);
+        return bytes;
+      }
+    }
+  } catch {
+    // Non-Node or restricted environment
+  }
+
+  // Fallback for headless/dev runtimes
+  for (let i = 0; i < length; i++) {
+    bytes[i] = Math.floor(Math.random() * 256);
   }
   return bytes;
 }

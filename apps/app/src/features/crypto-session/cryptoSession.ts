@@ -1,3 +1,4 @@
+import '../../lib/cryptoPolyfill';
 import {
   argon2idKdf,
   deriveAllSubkeys,

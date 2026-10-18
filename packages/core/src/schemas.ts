@@ -43,9 +43,6 @@ export const GuestPiiSchema: SchemaValidator<GuestPii> = {
     if (!val.name || typeof val.name !== 'string' || val.name.trim().length === 0) {
       issues.push({ path: ['name'], message: 'Guest name is required' });
     }
-    if (!val.idNumber || typeof val.idNumber !== 'string' || val.idNumber.trim().length === 0) {
-      issues.push({ path: ['idNumber'], message: 'ID number is required' });
-    }
     if (!val.phone || typeof val.phone !== 'string' || val.phone.trim().length === 0) {
       issues.push({ path: ['phone'], message: 'Phone number is required' });
     }
@@ -64,11 +61,12 @@ export const GuestPiiSchema: SchemaValidator<GuestPii> = {
       success: true,
       data: {
         name: (val.name as string).trim(),
-        serviceNumber: typeof val.serviceNumber === 'string' ? val.serviceNumber.trim() : null,
-        idNumber: (val.idNumber as string).trim(),
+        serviceNumber: typeof val.serviceNumber === 'string' && val.serviceNumber.trim().length > 0 ? val.serviceNumber.trim() : null,
+        idNumber: typeof val.idNumber === 'string' && val.idNumber.trim().length > 0 ? val.idNumber.trim() : null,
+        idType: typeof val.idType === 'string' && val.idType.trim().length > 0 ? val.idType.trim() : null,
         phone: (val.phone as string).trim(),
-        unit: typeof val.unit === 'string' ? val.unit.trim() : null,
-        notes: typeof val.notes === 'string' ? val.notes.trim() : null
+        unit: typeof val.unit === 'string' && val.unit.trim().length > 0 ? val.unit.trim() : null,
+        notes: typeof val.notes === 'string' && val.notes.trim().length > 0 ? val.notes.trim() : null
       }
     };
   }

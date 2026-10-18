@@ -85,7 +85,7 @@ export const RANKS: readonly RankInfo[] = [
 export const RANK_ORDER = RANKS;
 export type Category = VisitorCategory;
 
-export type BookingStatus = 'CONFIRMED' | 'CANCELLED' | 'DISPLACED' | 'COMPLETED';
+export type BookingStatus = 'CONFIRMED' | 'CANCELLED' | 'DISPLACED' | 'COMPLETED' | 'PENDING_ALLOTMENT';
 
 export type AllocationStatus = 'ACTIVE' | 'RELEASED' | 'EVICTED';
 

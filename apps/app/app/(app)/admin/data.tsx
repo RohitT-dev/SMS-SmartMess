@@ -91,25 +91,25 @@ export default function AdminDataScreen() {
     null,
   );
   const [endingBusy, setEndingBusy] = useState(false);
+
   const [deletingRoom, setDeletingRoom] = useState<RoomRow | null>(null);
   const [deletingBusy, setDeletingBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // Fetch rooms with their closures
   const { data: rooms, isLoading: roomsLoading } = useQuery<RoomRow[]>({
     queryKey: ['admin_all_rooms'],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('rooms')
-        .select('*')
-        .is('deleted_at', null)
-        .order('display_order');
+      const { data, error } = await supabase.from('rooms').select('*').is('deleted_at', null).order('display_order');
       if (error) throw error;
       const { data: closureRows, error: closureErr } = await supabase
         .from('room_closures')
         .select('*');
       if (closureErr) throw closureErr;
 
-      return (data || []).map((r) => ({
+      return (data || [])
+        .filter((r) => !r.deleted_at)
+        .map((r) => ({
         id: r.id as string,
         name: decryptRoomName(r.id, r.name_enc),
         room_type: r.room_type as string,
@@ -270,16 +270,22 @@ export default function AdminDataScreen() {
   const handleDeleteRoom = async () => {
     if (!deletingRoom) return;
     setDeletingBusy(true);
+    setDeleteError(null);
     try {
-      const { error } = await supabase.rpc('delete_room', { p_room_id: deletingRoom.id });
+      const { error } = await supabase.rpc('delete_room', {
+        p_room_id: deletingRoom.id,
+      });
       if (error) throw error;
-      logAction('rooms.delete', { entity: 'rooms', entityId: deletingRoom.id });
+      logAction('rooms.delete', {
+        entity: 'rooms',
+        entityId: deletingRoom.id,
+        meta: { name: deletingRoom.name, room_type: deletingRoom.room_type },
+      });
       setDeletingRoom(null);
       setPageError(null);
       refreshRoomData();
     } catch (err: unknown) {
-      setDeletingRoom(null);
-      setPageError(userErrorMessage(err, 'Could not delete the room.'));
+      setDeleteError(userErrorMessage(err, 'Could not delete the room.'));
     } finally {
       setDeletingBusy(false);
     }
@@ -379,21 +385,24 @@ export default function AdminDataScreen() {
                     </View>
                   </View>
                   {renderClosures(r)}
-                  <Button
-                    label="Mark Out of Service"
-                    variant="secondary"
-                    onPress={() => openClosureDialog(r.id)}
-                    style={{ marginTop: spacing.sm }}
-                  />
-                  {isAdmin && (
+                  <View style={{ flexDirection: 'row', gap: spacing.xs, marginTop: spacing.sm }}>
                     <Button
-                      label="Delete Room"
-                      variant="destructive"
-                      accessibilityLabel={`Delete room ${r.name}`}
-                      onPress={() => setDeletingRoom(r)}
-                      style={{ marginTop: spacing.sm }}
+                      label="Mark Out of Service"
+                      variant="secondary"
+                      onPress={() => openClosureDialog(r.id)}
+                      style={{ flex: 1 }}
                     />
-                  )}
+                    {(isAdmin || r.room_type !== 'SUITE') && (
+                      <Button
+                        label="Delete"
+                        variant="destructive"
+                        onPress={() => {
+                          setDeleteError(null);
+                          setDeletingRoom(r);
+                        }}
+                      />
+                    )}
+                  </View>
                 </Card>
               );
             })}
@@ -436,7 +445,7 @@ export default function AdminDataScreen() {
                 {
                   key: 'actions',
                   header: 'Actions',
-                  width: isAdmin ? 340 : 190,
+                  width: 250,
                   render: (r: RoomRow) => (
                     <View style={{ flexDirection: 'row', gap: spacing.xs }}>
                       <Button
@@ -444,12 +453,14 @@ export default function AdminDataScreen() {
                         variant="secondary"
                         onPress={() => openClosureDialog(r.id)}
                       />
-                      {isAdmin && (
+                      {(isAdmin || r.room_type !== 'SUITE') && (
                         <Button
                           label="Delete"
                           variant="destructive"
-                          accessibilityLabel={`Delete room ${r.name}`}
-                          onPress={() => setDeletingRoom(r)}
+                          onPress={() => {
+                            setDeleteError(null);
+                            setDeletingRoom(r);
+                          }}
                         />
                       )}
                     </View>
@@ -556,18 +567,6 @@ export default function AdminDataScreen() {
           {closureError && <Banner type="error" message={closureError} />}
         </Dialog>
 
-        {/* Delete room confirmation */}
-        <Dialog
-          visible={!!deletingRoom}
-          title={`Delete ${deletingRoom?.name ?? 'room'}?`}
-          message="The room is removed from inventory and can no longer be booked. Past bookings keep their history. Rooms with current or upcoming bookings cannot be deleted."
-          confirmLabel="Delete Room"
-          confirmVariant="destructive"
-          onConfirm={handleDeleteRoom}
-          onCancel={() => setDeletingRoom(null)}
-          loading={deletingBusy}
-        />
-
         {/* End closure confirmation */}
         <Dialog
           visible={!!endingClosure}
@@ -583,6 +582,27 @@ export default function AdminDataScreen() {
           onCancel={() => setEndingClosure(null)}
           loading={endingBusy}
         />
+
+        {/* Delete room confirmation */}
+        <Dialog
+          visible={!!deletingRoom}
+          title={`Delete ${deletingRoom?.name}?`}
+          message={
+            deletingRoom
+              ? `Are you sure you want to delete room "${deletingRoom.name}"? It will be removed from inventory and cannot be booked in the future.`
+              : ''
+          }
+          confirmLabel="Delete Room"
+          confirmVariant="destructive"
+          onConfirm={handleDeleteRoom}
+          onCancel={() => {
+            setDeletingRoom(null);
+            setDeleteError(null);
+          }}
+          loading={deletingBusy}
+        >
+          {deleteError && <Banner type="error" message={deleteError} style={{ marginTop: spacing.sm }} />}
+        </Dialog>
       </View>
     </Screen>
   );
