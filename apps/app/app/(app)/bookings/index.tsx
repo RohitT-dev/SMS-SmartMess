@@ -188,7 +188,8 @@ export default function BookingsLedgerScreen() {
       }
 
       logAction('bookings.search', {
-        meta: { query: q, results: ids.size },
+        // The query can be a name, phone number or ID: log only its length.
+        meta: { query_length: q.length, results: ids.size },
       });
 
       setPage(0);
