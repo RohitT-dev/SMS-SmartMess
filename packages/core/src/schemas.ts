@@ -43,9 +43,6 @@ export const GuestPiiSchema: SchemaValidator<GuestPii> = {
     if (!val.name || typeof val.name !== 'string' || val.name.trim().length === 0) {
       issues.push({ path: ['name'], message: 'Guest name is required' });
     }
-    if (!val.idNumber || typeof val.idNumber !== 'string' || val.idNumber.trim().length === 0) {
-      issues.push({ path: ['idNumber'], message: 'ID number is required' });
-    }
     if (!val.phone || typeof val.phone !== 'string' || val.phone.trim().length === 0) {
       issues.push({ path: ['phone'], message: 'Phone number is required' });
     }
@@ -72,6 +69,7 @@ function normalizePii(val: Record<string, unknown>): GuestPii {
     name: (val.name as string).trim(),
     serviceNumber: optionalTrimmed(val.serviceNumber),
     idNumber: optionalTrimmed(val.idNumber),
+    idType: optionalTrimmed(val.idType),
     phone: optionalTrimmed(val.phone),
     unit: optionalTrimmed(val.unit),
     notes: optionalTrimmed(val.notes)

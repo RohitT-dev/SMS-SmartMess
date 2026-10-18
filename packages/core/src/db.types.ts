@@ -124,6 +124,7 @@ export interface Database {
       booking_guests: {
         Row: {
           id: string;
+          guest_code: string;
           booking_id: string;
           seq: number;
           gender: Gender;

@@ -23,6 +23,13 @@ const LABELS: Record<string, string> = {
   'bookings.cancel': 'Booking cancelled (client)',
   'bookings.deny': 'Request denied (client)',
   'bookings.eviction_approved': 'Eviction approved (client)',
+  room_deleted: 'Room deleted',
+  'rooms.delete': 'Room deleted (client)',
+  booking_dates_updated: 'Booking dates updated',
+  'bookings.update_dates': 'Booking dates modified (client)',
+  booking_request_created: 'Booking request created',
+  booking_allotted: 'Room allotted',
+  'bookings.allot': 'Room allotted (client)',
 };
 
 /** Readable label for an audit action code; unknown codes are title-cased. */

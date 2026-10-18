@@ -25,6 +25,7 @@ import {
   reencryptBatch,
   resealForUsers,
   getRandomBytes,
+  setRandomBytesProvider,
 } from './index.ts';
 
 describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
@@ -367,5 +368,34 @@ describe('packages/crypto - Comprehensive Cryptographic Suite', () => {
     assert.strictEqual(result.failed.length, 1);
     assert.strictEqual(result.failed[0].id, 'booking-bad');
     assert.ok(result.failed[0].error.length > 0);
+  });
+
+  it('Custom RNG provider can be registered and used by envelope encryption', () => {
+    let providerCalled = false;
+    setRandomBytesProvider((len: number) => {
+      providerCalled = true;
+      const b = new Uint8Array(len);
+      b.fill(42);
+      return b;
+    });
+
+    try {
+      const bytes = getRandomBytes(24);
+      assert.strictEqual(bytes.length, 24);
+      assert.strictEqual(bytes[0], 42);
+      assert.strictEqual(providerCalled, true);
+
+      // Verify envelope encryption succeeds using the custom provider
+      const subkey = new Uint8Array(32).fill(7);
+      const ct = encryptEnvelope({
+        plaintext: 'Cancelled duty',
+        subkey,
+        keyVersion: 1,
+        aad: 'bookings.cancel_reason_enc.11111111-1111-1111-1111-111111111111',
+      });
+      assert.ok(ct.startsWith('v1.1.'));
+    } finally {
+      setRandomBytesProvider(null);
+    }
   });
 });

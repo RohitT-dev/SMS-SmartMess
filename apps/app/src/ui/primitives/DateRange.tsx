@@ -1,8 +1,10 @@
 import React from 'react';
-import { View, Text, TextInput, StyleSheet, Platform } from 'react-native';
+import { View, Text, TextInput, StyleSheet, Platform, Pressable } from 'react-native';
 import { useThemeStore } from '../../state/themeStore';
 import { layout, spacing, typography } from '../tokens';
 import { isValidDateString } from '../../lib/dates';
+import { Icon } from './Icon';
+import { CalendarPickerModal } from './CalendarPickerModal';
 
 export interface DateRangeProps {
   label?: string;
@@ -82,12 +84,13 @@ export const DateRange: React.FC<DateRangeProps> = ({
   onEndDateChange,
   disabled = false,
   error,
-  startLabel = 'Check-In',
-  endLabel = 'Check-Out',
+  startLabel = 'Check-In (12:00 PM)',
+  endLabel = 'Check-Out (12:00 PM)',
   inclusive = false,
   hideNights = false
 }) => {
   const colors = useThemeStore((s) => s.colors);
+  const [calendarOpen, setCalendarOpen] = React.useState(false);
 
   // Built-in validation so every screen shows the same message for bad ranges.
   const startOk = isValidDateString(startDate);
@@ -128,14 +131,43 @@ export const DateRange: React.FC<DateRangeProps> = ({
             hasError={!!derivedError}
           />
         </View>
+
+        <Pressable
+          onPress={() => setCalendarOpen(true)}
+          disabled={disabled}
+          style={({ pressed }) => [
+            styles.calendarButton,
+            {
+              backgroundColor: pressed ? colors.greySoft : colors.surfaceAlt,
+              borderColor: derivedError ? colors.red : colors.borderStrong,
+            },
+          ]}
+          accessibilityRole="button"
+          accessibilityLabel="Open visual calendar picker"
+        >
+          <Icon name="calendar" size={18} color={colors.navy} />
+        </Pressable>
       </View>
+
+      <CalendarPickerModal
+        visible={calendarOpen}
+        onClose={() => setCalendarOpen(false)}
+        startDate={startDate}
+        endDate={endDate}
+        onApply={(s, e) => {
+          onStartDateChange?.(s);
+          onEndDateChange?.(e);
+        }}
+        allowPastDates={inclusive}
+      />
+
       {derivedError ? (
         <Text style={[styles.error, { color: colors.red }]} accessibilityRole="alert">
           {derivedError}
         </Text>
       ) : nights > 0 && !inclusive && !hideNights ? (
         <Text style={[styles.subLabel, { color: colors.muted, marginTop: spacing.xs }]}>
-          {nights} night{nights === 1 ? '' : 's'} · check-out morning is free for the next guest
+          {nights} night{nights === 1 ? '' : 's'} · 12:00 PM check-in → 12:00 PM check-out (same-day check-in available from 12:00 PM)
         </Text>
       ) : null}
     </View>
@@ -178,5 +210,14 @@ const styles = StyleSheet.create({
   error: {
     fontSize: typography.xs,
     marginTop: spacing.xs
-  }
+  },
+  calendarButton: {
+    height: layout.minTouchTarget,
+    width: layout.minTouchTarget,
+    borderWidth: layout.borderWidth,
+    borderRadius: layout.borderRadius,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 14,
+  },
 });

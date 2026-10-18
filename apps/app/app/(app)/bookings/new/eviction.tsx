@@ -31,7 +31,6 @@ import {
   type SharingPerson,
 } from '@sms/core';
 import { guestRowsPayload } from '../../../../src/features/bookings/planBooking';
-import { saveCivilianDetails } from '../../../../src/features/bookings/party';
 
 /** Stand-in booking id for the incoming party, which has no id until it is created. */
 const INCOMING = 'incoming';
@@ -213,7 +212,6 @@ export default function EvictionReviewScreen() {
         entityId: incomingBookingId as string,
         meta: { category, evicted: selectedAllocationIds.length },
       });
-      await saveCivilianDetails(incomingBookingId as string, guests);
 
       setShowConfirmDialog(false);
       router.replace(`/(app)/bookings/${incomingBookingId}/confirmed` as any);

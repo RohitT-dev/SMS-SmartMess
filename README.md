@@ -1,6 +1,6 @@
 # Smart Mess System (SMS)
 
-A mission-critical, zero-knowledge encrypted room inventory, allocation, and ledger management system built with **Expo SDK 57** (React Native 0.86, Android target API 36) (Web, iOS, Android) and **Supabase** (PostgreSQL, Row-Level Security, RPC functions, and pgTAP tests).
+A mission-critical, zero-knowledge encrypted room inventory, allocation, and ledger management system built with **Expo SDK 52** (Web, iOS, Android) and **Supabase** (PostgreSQL, Row-Level Security, RPC functions, and pgTAP tests).
 
 ---
 
@@ -165,8 +165,7 @@ Pick the path that fits who is installing. All of them connect to the Supabase p
 | **A. Web app on the home screen** | Yes | Yes | A web host | Fastest rollout to staff, no app store |
 | **B. Android APK** | Yes | No | Free Expo account | Installing the real app on Android phones |
 | **C. iPhone build** | No | Yes | Apple Developer account (paid) | Installing the real app on iPhones |
-| **D. Google Play (Internal testing)** | Yes | No | Google Play developer account | Installing on any Android phone without Play Protect warnings |
-| **E. Expo Go (testing only)** | Yes | Limited | Phone on the same Wi-Fi | Developers trying a change |
+| **D. Expo Go (testing only)** | Yes | Limited | Phone on the same Wi-Fi | Developers trying a change |
 
 #### A. Web app on the home screen (Android and iPhone)
 1. Build the web app:
@@ -209,8 +208,6 @@ When it finishes, EAS prints a download link and a QR code. On each Android phon
 
 To update, run the same build again and install the new APK over the old one; data stays in Supabase.
 
-Sideloaded APKs can show a Google Play Protect warning on some phones. To avoid it, distribute through Google Play instead (path D).
-
 Without EAS, a computer with Android Studio can build locally:
 ```bash
 cd apps/app
@@ -225,26 +222,12 @@ Apple does not allow installing app files directly, so iPhones need an **Apple D
 
 Set the same EAS environment variables as in B, using `--environment production` for TestFlight builds. Without a developer account, use **path A** on iPhones.
 
-#### D. Google Play Internal testing (Android, no Play Protect warnings)
-The app targets Android API 36, which Google Play requires for new apps, so it can be uploaded to the Play Store. The Internal testing track reaches up to 100 testers without a store review.
-
-1. In the [Play Console](https://play.google.com/console), create an app with package name `mil.gov.sms`.
-2. Set the EAS environment variables from B with `--environment production`.
-3. Build an app bundle:
-   ```bash
-   eas build --platform android --profile production
-   ```
-4. Upload the first `.aab` by hand: **Testing → Internal testing → Create new release**. Google requires the first upload to go through the Play Console. Later builds can use `eas submit --platform android` once a Google service account key is configured.
-5. Add testers' Google accounts under **Testers**, then share the opt-in link. Testers open it, accept, and install **Smart Mess System** from the Play Store.
-
-Every upload needs a higher Android version code. Before each release, add or raise `versionCode` under `android` in `app.config.ts` (and `version` if you like), then build and upload again.
-
-#### E. Expo Go (developers testing a change)
+#### D. Expo Go (developers testing a change)
 1. Run `pnpm start` on your computer, with the phone on the same Wi-Fi. Add `--tunnel` if the networks differ: `pnpm --filter app exec expo start --tunnel`.
 2. Scan the QR code: with the Camera app on iPhone, or inside Expo Go on Android.
 
 Notes:
-- **SDK versions:** this app uses **Expo SDK 57**. The store versions of Expo Go only run the newest SDK. If Expo Go has moved past SDK 57, use path A or C on iPhone, and on Android install the Expo Go build for SDK 57 from [expo.dev/go](https://expo.dev/go).
+- **SDK versions:** this app uses **Expo SDK 52**. The App Store version of Expo Go only runs the newest SDK, so on iPhone use path A or C. On Android, install the Expo Go build for SDK 52 from [expo.dev/go](https://expo.dev/go).
 - **Local database:** if `.env` points at a local Supabase (`http://127.0.0.1:54321`), the phone can't reach it. Use your computer's Wi-Fi IP instead (for example `http://192.168.1.20:54321`), or a cloud project.
 
 ### Troubleshooting

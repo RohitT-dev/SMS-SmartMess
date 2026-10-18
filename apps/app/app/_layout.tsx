@@ -1,3 +1,4 @@
+import '../src/lib/cryptoPolyfill';
 import React, { useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { Stack, useRouter, useSegments, useRootNavigationState } from 'expo-router';
@@ -30,7 +31,7 @@ function isInviteOrRecoveryLink(): boolean {
 /** Keeps the Supabase session in sync and redirects signed-out users to sign-in. */
 function useSupabaseAuth() {
   const router = useRouter();
-  const segments = useSegments();
+  const segments = useSegments() as unknown as string[];
   const navState = useRootNavigationState();
   const { ready, session, needsPasswordSet, setSession, setReady, setNeedsPasswordSet } =
     useAuthStore();

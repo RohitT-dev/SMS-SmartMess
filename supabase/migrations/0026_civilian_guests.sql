@@ -119,6 +119,7 @@ DECLARE
   v_check_out DATE;
   v_party_size INT;
   v_is_suite BOOLEAN;
+  v_status public.booking_status;
   v_guest JSONB;
   v_alloc JSONB;
   v_guest_id UUID;
@@ -150,6 +151,13 @@ BEGIN
     RAISE EXCEPTION 'ERR_PARTY_MISMATCH' USING errcode = 'P0001';
   END IF;
 
+  -- No allocations (or an explicit request) leaves the booking waiting for room allotment
+  IF p_booking->>'status' = 'PENDING_ALLOTMENT' OR p_allocations IS NULL OR jsonb_array_length(p_allocations) = 0 THEN
+    v_status := 'PENDING_ALLOTMENT';
+  ELSE
+    v_status := 'CONFIRMED';
+  END IF;
+
   -- Callers that predate relation send none: the first guest is the primary, ranked guests
   -- after it are SERVICE, unranked ones OTHER.
   SELECT min((g->>'seq')::INT) INTO v_min_seq FROM jsonb_array_elements(p_guests) g;
@@ -168,16 +176,18 @@ BEGIN
     check_out,
     party_size,
     is_suite_booking,
+    preferred_room_type,
     notes_enc,
     key_version,
     created_by
   ) VALUES (
     v_category,
-    'CONFIRMED',
+    v_status,
     v_check_in,
     v_check_out,
     v_party_size,
     v_is_suite,
+    NULLIF(p_booking->>'preferred_room_type', '')::public.room_type,
     p_booking->>'notes_enc',
     COALESCE((p_booking->>'key_version')::INT, 1),
     auth.uid()
@@ -199,6 +209,10 @@ BEGIN
       gender,
       rank_code,
       relation,
+      guest_name,
+      service_number,
+      unit,
+      phone,
       details,
       created_by
     ) VALUES (
@@ -207,6 +221,10 @@ BEGIN
       (v_guest->>'gender')::public.gender,
       (v_guest->>'rank_code')::public.rank_code,
       v_relation,
+      NULLIF(v_guest->>'guest_name', ''),
+      NULLIF(v_guest->>'service_number', ''),
+      NULLIF(v_guest->>'unit', ''),
+      NULLIF(v_guest->>'phone', ''),
       'PENDING',
       auth.uid()
     ) RETURNING id INTO v_guest_id;
@@ -214,7 +232,7 @@ BEGIN
     v_guest_map := jsonb_set(v_guest_map, ARRAY[(v_guest->>'seq')::text], to_jsonb(v_guest_id));
   END LOOP;
 
-  FOR v_alloc IN SELECT * FROM jsonb_array_elements(p_allocations) LOOP
+  FOR v_alloc IN SELECT * FROM jsonb_array_elements(COALESCE(p_allocations, '[]'::jsonb)) LOOP
     v_guest_id := (v_guest_map->>(v_alloc->>'guest_seq'))::UUID;
     IF v_guest_id IS NULL AND (v_alloc->>'guest_id') IS NOT NULL THEN
       v_guest_id := (v_alloc->>'guest_id')::UUID;
@@ -243,11 +261,17 @@ BEGIN
     );
   END LOOP;
 
+  IF v_status = 'PENDING_ALLOTMENT' THEN
+    PERFORM public.log_audit_event('booking_request_created', 'bookings', v_booking_id, jsonb_build_object('category', v_category, 'party_size', v_party_size));
+  ELSE
+    PERFORM public.log_audit_event('booking_created', 'bookings', v_booking_id, jsonb_build_object('category', v_category, 'party_size', v_party_size));
+  END IF;
+
   RETURN v_booking_id;
 END;
 $$;
 
--- 5. daily_room_state reports relation
+-- 5. daily_room_state reports relation (alongside main's guestCode)
 CREATE OR REPLACE FUNCTION public.daily_room_state(p_from DATE, p_to DATE)
 RETURNS TABLE(
   room_id UUID,
@@ -298,6 +322,7 @@ BEGIN
           'bedSlot', a.bed_slot,
           'gender', bg.gender,
           'rankCode', bg.rank_code,
+          'guestCode', bg.guest_code,
           'relation', bg.relation,
           'category', b.category,
           'bookingStatus', b.status,

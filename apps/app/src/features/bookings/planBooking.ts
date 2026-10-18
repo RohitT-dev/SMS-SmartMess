@@ -14,12 +14,25 @@ export function alternatesHorizonEnd(checkOut: string): string {
   return addDaysToDateString(checkOut, ALTERNATE_HORIZON_DAYS);
 }
 
-/** p_guests rows for create_booking / approve_eviction: seq, gender, rank (null for civilians), relation. */
-export function guestRowsPayload(guests: GuestDemand[]) {
+/** p_guests rows for create_booking / approve_eviction: seq, gender, rank (null for civilians), relation, plus any contact details. */
+export function guestRowsPayload(
+  guests: Array<
+    GuestDemand & {
+      name?: string | null;
+      serviceNumber?: string | null;
+      unit?: string | null;
+      phone?: string | null;
+    }
+  >,
+) {
   return guests.map((g, idx) => ({
     seq: idx + 1,
     gender: g.gender,
     rank_code: g.rankCode,
     relation: guestRelation(g, idx),
+    guest_name: g.name || null,
+    service_number: g.serviceNumber || null,
+    unit: g.unit || null,
+    phone: g.phone || null,
   }));
 }

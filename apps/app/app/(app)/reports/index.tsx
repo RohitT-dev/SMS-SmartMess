@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
+import { useRouter } from 'expo-router';
 import { useQuery } from '@tanstack/react-query';
 import { useThemeStore } from '../../../src/state/themeStore';
 import { Screen } from '../../../src/ui/primitives/Screen';
@@ -20,6 +21,7 @@ import { exportReportPdf } from '../../../src/features/reports/pdfGenerator';
 import { reportInsights, type ReportDailyRow } from '@sms/core';
 
 export default function ReportsScreen() {
+  const router = useRouter();
   const colors = useThemeStore((s) => s.colors);
 
   const [rangePreset, setRangePreset] = useState<'this_month' | 'last_month' | 'custom'>(
@@ -137,6 +139,15 @@ export default function ReportsScreen() {
   return (
     <Screen title="Occupancy & Insights Reports" showBack={false}>
       <View style={styles.container}>
+        {/* Navigation to Grid Matrix */}
+        <View style={{ marginBottom: spacing.sm, flexDirection: 'row', justifyContent: 'flex-end' }}>
+          <Button
+            label="📅 Room Occupancy Grid Matrix (Custom Dates & PDF)"
+            variant="secondary"
+            onPress={() => router.push('/(app)/reports/grid' as any)}
+          />
+        </View>
+
         {/* Preset Selector */}
         <Card>
           <Text style={[styles.cardTitle, { color: colors.navy }]}>Reporting period</Text>
@@ -176,7 +187,7 @@ export default function ReportsScreen() {
             label="Peak Day"
             value={insights.peakDay ? `${insights.peakCount} (${insights.peakDay})` : 'N/A'}
           />
-          <Stat label="Priority Share" value={`${insights.msaPiSharePercentage}%`} />
+          <Stat label="Priority Share" value={`${insights.mfaPiSharePercentage}%`} />
           <Stat label="Peak Occupancy" value={`${insights.peakOccupancyPercentage}%`} />
         </View>
 

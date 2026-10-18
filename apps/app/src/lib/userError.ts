@@ -11,7 +11,6 @@ const EXTRA_MESSAGES: Array<[match: string, message: string]> = [
   ['ERR_NOT_ENOUGH_BEDS', 'Select at least one bed for every incoming guest before approving the eviction.'],
   ['ERR_CANNOT_EVICT', 'That booking has equal or higher priority than the incoming request and cannot be displaced.'],
   ['ERR_ROOM_OCCUPIED', 'This room still has active bookings in that period. Cancel or move them first, then mark the room out of service.'],
-  ['ERR_ROOM_HAS_BOOKINGS', 'This room still has current or upcoming bookings. Cancel or move them before deleting the room.'],
   ['ERR_NO_EVICTIONS', 'Select at least one occupant to displace.'],
   ['ERR_ALLOCATION_NOT_ACTIVE', 'One of the selected occupants has already moved or left. Go back and reload the candidate list.'],
   ['ERR_DEVICE_REVOKED', 'This device has been revoked. Contact an Administrator.'],
@@ -20,6 +19,11 @@ const EXTRA_MESSAGES: Array<[match: string, message: string]> = [
   ['Eviction reason must be', 'The eviction reason must be at least 10 characters.'],
   ['row-level security policy for table "rooms"', 'Only an Administrator can add or change suites.'],
   ['row-level security policy for table "room_closures"', 'Only an Administrator can mark a suite out of service.'],
+  ['ERR_ROOM_HAS_ACTIVE_BOOKINGS', 'Cannot delete this room because it has active or upcoming bookings. Relocate or cancel those bookings first.'],
+  ['ERR_ROOM_CLOSED', 'Cannot extend stay: the room is scheduled for maintenance during the requested period.'],
+  ['ERR_DOUBLE_BOOKING', 'Cannot extend stay: the room or bed is already booked by another guest for overlapping dates.'],
+  ['ERR_BOOKING_NOT_ACTIVE', 'Only confirmed bookings can have their dates modified.'],
+  ['ERR_CANNOT_CHANGE_PAST_CHECKIN', 'Cannot change the check-in date for a booking that has already started.'],
   ['not-null constraint', 'A required field is missing. Check the form and try again.'],
 ];
 

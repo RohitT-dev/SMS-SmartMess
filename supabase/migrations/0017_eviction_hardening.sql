@@ -2,9 +2,9 @@
 -- approve_eviction fixes found while testing booking permutations:
 --
 --  1. Category precedence is now enforced on the server. Previously only the client filtered
---     candidates, so any caller holding approve_eviction could displace an MSA booking (or a
+--     candidates, so any caller holding approve_eviction could displace an MFA booking (or a
 --     PI booking by a LEAVE request) by calling the RPC directly. Rule (same as
---     canDisplace() in @sms/core): MSA may displace PI/LEAVE/TD, PI may displace LEAVE/TD,
+--     canDisplace() in @sms/core): MFA may displace PI/LEAVE/TD, PI may displace LEAVE/TD,
 --     nobody else displaces anyone.
 --  2. Evicting one bed of a multi-bed booking no longer marks the whole booking DISPLACED
 --     while its other beds stay ACTIVE. That left occupied beds attached to a booking the UI
@@ -69,7 +69,7 @@ BEGIN
     END IF;
 
     IF NOT (
-      (v_incoming_category = 'MSA' AND v_displaced_category IN ('PI', 'LEAVE', 'TD')) OR
+      (v_incoming_category = 'MFA' AND v_displaced_category IN ('PI', 'LEAVE', 'TD')) OR
       (v_incoming_category = 'PI' AND v_displaced_category IN ('LEAVE', 'TD'))
     ) THEN
       RAISE EXCEPTION 'ERR_CANNOT_EVICT: % cannot displace %', v_incoming_category, v_displaced_category

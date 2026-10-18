@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { localDateString } from '../../../src/lib/dates';
 import { useThemeStore } from '../../../src/state/themeStore';
 import { useSessionStore } from '../../../src/state/sessionStore';
@@ -11,9 +11,13 @@ import { Badge } from '../../../src/ui/primitives/Badge';
 import { Button } from '../../../src/ui/primitives/Button';
 import { MaskedValue } from '../../../src/ui/primitives/MaskedValue';
 import { Skeleton } from '../../../src/ui/primitives/Skeleton';
+import { Dialog } from '../../../src/ui/primitives/Dialog';
+import { Banner } from '../../../src/ui/primitives/Banner';
 import { spacing, typography } from '../../../src/ui/tokens';
 import { supabase } from '../../../src/lib/supabase';
 import { describeGuest } from '../../../src/features/bookings/party';
+import { logAction } from '../../../src/lib/activityLog';
+import { userErrorMessage } from '../../../src/lib/userError';
 import {
   decryptGuestPii,
   decryptRoomName,
@@ -40,7 +44,12 @@ export default function RoomDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const colors = useThemeStore((s) => s.colors);
+  const queryClient = useQueryClient();
   const { userRole, userPermissions } = useSessionStore();
+
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [deletingBusy, setDeletingBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const canReveal = userRole === 'admin' || userPermissions.includes('reveal_guest_pii');
   const canManageRooms = userRole === 'admin' || userPermissions.includes('manage_rooms');
@@ -79,9 +88,12 @@ export default function RoomDetailScreen() {
     },
   });
 
-  // "Today" is the stay interval [check_in, check_out): check-out morning is already free.
+  // "Today" is the stay interval [check_in, check_out): check-out happens at 12:00 PM noon.
   const current = (room?.allocations ?? []).filter(
     (a) => a.bookings && a.bookings.check_in <= today && today < a.bookings.check_out,
+  );
+  const departingToday = (room?.allocations ?? []).filter(
+    (a) => a.bookings && a.bookings.check_out === today,
   );
   const upcoming = (room?.allocations ?? [])
     .filter((a) => a.bookings && a.bookings.check_in > today)
@@ -91,6 +103,19 @@ export default function RoomDetailScreen() {
     return !!m && m[1] <= today && today < m[2];
   });
 
+  const handleNewBooking = (bedSlot?: 1 | 2) => {
+    if (!room) return;
+    router.push({
+      pathname: '/(app)/bookings/new' as any,
+      params: {
+        roomId: room.id,
+        roomType: room.room_type,
+        roomName: room.name,
+        ...(bedSlot ? { bedSlot: String(bedSlot) } : {}),
+      },
+    });
+  };
+
   const fetchPii = async (guestId: string) => {
     const { data: cipher, error } = await supabase.rpc('get_guest_pii', {
       p_guest_id: guestId,
@@ -99,6 +124,36 @@ export default function RoomDetailScreen() {
     if (!cipher) return 'Details Pending';
     const pii = decryptGuestPii(guestId, cipher);
     return `${pii.name} (Service: ${pii.serviceNumber || 'N/A'}, Phone: ${pii.phone || 'N/A'})`;
+  };
+
+  const canDeleteRoom = canManageRooms && (room?.room_type !== 'SUITE' || userRole === 'admin');
+
+  const handleDeleteRoom = async () => {
+    if (!room) return;
+    setDeletingBusy(true);
+    setDeleteError(null);
+    try {
+      const { error } = await supabase.rpc('delete_room', {
+        p_room_id: room.id,
+      });
+      if (error) throw error;
+      logAction('rooms.delete', {
+        entity: 'rooms',
+        entityId: room.id,
+        meta: { name: room.name, room_type: room.room_type },
+      });
+      queryClient.invalidateQueries({ queryKey: ['admin_all_rooms'] });
+      queryClient.invalidateQueries({ queryKey: ['room_names'] });
+      queryClient.invalidateQueries({ queryKey: ['available_rooms_list'] });
+      queryClient.invalidateQueries({ queryKey: ['daily_room_state'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard_counts'] });
+      setShowDeleteDialog(false);
+      router.back();
+    } catch (err: unknown) {
+      setDeleteError(userErrorMessage(err, 'Could not delete the room.'));
+    } finally {
+      setDeletingBusy(false);
+    }
   };
 
   if (roomLoading) {
@@ -114,13 +169,31 @@ export default function RoomDetailScreen() {
 
   const renderBed = (slot: 1 | 2) => {
     const alloc = current.find((a) => a.bed_slot === slot);
+    const departing = departingToday.find((a) => a.bed_slot === slot);
+
     return (
       <Card style={styles.bedCard} key={slot}>
         <View style={styles.bedHeader}>
           <Text style={[styles.bedTitle, { color: colors.text }]}>Bed {slot} · today</Text>
           <Badge
-            label={alloc ? 'OCCUPIED' : closedToday ? 'CLOSED' : 'FREE'}
-            variant={alloc ? 'warning' : closedToday ? 'default' : 'success'}
+            label={
+              alloc
+                ? 'OCCUPIED'
+                : departing
+                  ? 'DEPARTING (12 PM)'
+                  : closedToday
+                    ? 'CLOSED'
+                    : 'FREE'
+            }
+            variant={
+              alloc
+                ? 'warning'
+                : departing
+                  ? 'navy'
+                  : closedToday
+                    ? 'default'
+                    : 'success'
+            }
           />
         </View>
 
@@ -134,7 +207,7 @@ export default function RoomDetailScreen() {
               </Text>
             </Text>
             <Text style={[styles.infoRow, { color: colors.muted }]}>
-              Stay: {alloc.bookings?.check_in} to {alloc.bookings?.check_out}
+              Stay: {alloc.bookings?.check_in} (12 PM) to {alloc.bookings?.check_out} (12 PM)
             </Text>
 
             <MaskedValue
@@ -151,12 +224,38 @@ export default function RoomDetailScreen() {
               style={{ marginTop: spacing.sm }}
             />
           </View>
+        ) : departing ? (
+          <View style={styles.occupantInfo}>
+            <Text style={[styles.infoRow, { color: colors.text }]}>
+              Departing Guest: <Text style={{ fontWeight: 'bold' }}>{departing.booking_guests?.rank_code}</Text> •
+              Gender: <Text style={{ fontWeight: 'bold' }}>{departing.booking_guests?.gender}</Text>
+            </Text>
+            <Text style={[styles.infoRow, { color: colors.blue }]}>
+              Vacates today at 12:00 PM · Available for new check-in from 12:00 PM
+            </Text>
+            <Button
+              label={`Book Bed ${slot} from 12 PM Today`}
+              variant="primary"
+              onPress={() => handleNewBooking(slot)}
+              style={{ marginTop: spacing.sm }}
+            />
+          </View>
         ) : (
-          <Text style={[styles.freeNotice, { color: closedToday ? colors.muted : colors.green }]}>
-            {closedToday
-              ? 'Out of service today'
-              : 'Available. A ranked guest must match the other occupant’s gender and rank; civilians share only with their own booking.'}
-          </Text>
+          <View>
+            <Text style={[styles.freeNotice, { color: closedToday ? colors.muted : colors.green }]}>
+              {closedToday
+                ? 'Out of service today'
+                : 'Available. 12:00 PM Check-In / 12:00 PM Check-Out standard mess rule applies. A ranked guest must match the other occupant’s gender and rank; civilians share only with their own booking.'}
+            </Text>
+            {!closedToday && (
+              <Button
+                label={`Book Bed ${slot}`}
+                variant="secondary"
+                onPress={() => handleNewBooking(slot)}
+                style={{ marginTop: spacing.sm }}
+              />
+            )}
+          </View>
         )}
       </Card>
     );
@@ -169,7 +268,7 @@ export default function RoomDetailScreen() {
           <View style={{ flex: 1 }}>
             <Text style={[styles.title, { color: colors.navy }]}>{room?.name}</Text>
             <Text style={[styles.subtitle, { color: colors.muted }]}>
-              {room?.room_type?.replace('_', ' ')} ROOM • Capacity: 2 Beds
+              {room?.room_type?.replace('_', ' ')} ROOM • Capacity: 2 Beds • 12:00 PM Check-In / 12:00 PM Check-Out
             </Text>
           </View>
           <Badge
@@ -193,7 +292,7 @@ export default function RoomDetailScreen() {
         ) : (
           upcoming.map((a) => (
             <Text key={a.id} style={[styles.infoRow, { color: colors.text }]}>
-              {a.bookings?.check_in} → {a.bookings?.check_out} • Bed {a.bed_slot} •{' '}
+              {a.bookings?.check_in} (12 PM) → {a.bookings?.check_out} (12 PM) • Bed {a.bed_slot} •{' '}
               {a.bookings?.category} • {a.booking_guests ? describeGuest(a.booking_guests) : '—'}
             </Text>
           ))
@@ -217,8 +316,8 @@ export default function RoomDetailScreen() {
 
       <View style={styles.actions}>
         <Button
-          label="New Booking"
-          onPress={() => router.push('/bookings/new')}
+          label={`New Booking for ${room?.name || 'this Room'}`}
+          onPress={() => handleNewBooking()}
           style={{ marginBottom: spacing.sm }}
         />
         {canManageRooms ? (
@@ -228,7 +327,35 @@ export default function RoomDetailScreen() {
             onPress={() => router.push(`/admin/data?roomId=${id}`)}
           />
         ) : null}
+        {canDeleteRoom ? (
+          <Button
+            label="Delete Room"
+            variant="destructive"
+            onPress={() => {
+              setDeleteError(null);
+              setShowDeleteDialog(true);
+            }}
+            style={{ marginTop: spacing.sm }}
+          />
+        ) : null}
       </View>
+
+      {/* Delete Room Dialog */}
+      <Dialog
+        visible={showDeleteDialog}
+        title={`Delete ${room?.name}?`}
+        message={`Are you sure you want to delete room "${room?.name}"? It will be removed from inventory and cannot be booked in the future.`}
+        confirmLabel="Delete Room"
+        confirmVariant="destructive"
+        onConfirm={handleDeleteRoom}
+        onCancel={() => {
+          setShowDeleteDialog(false);
+          setDeleteError(null);
+        }}
+        loading={deletingBusy}
+      >
+        {deleteError && <Banner type="error" message={deleteError} style={{ marginTop: spacing.sm }} />}
+      </Dialog>
     </Screen>
   );
 }

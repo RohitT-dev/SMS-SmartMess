@@ -11,7 +11,7 @@ EXCEPTION
 END $$;
 
 DO $$ BEGIN
-  CREATE TYPE public.category AS ENUM ('MSA', 'PI', 'LEAVE', 'TD');
+  CREATE TYPE public.category AS ENUM ('MFA', 'PI', 'LEAVE', 'TD');
 EXCEPTION
   WHEN duplicate_object THEN null;
 END $$;

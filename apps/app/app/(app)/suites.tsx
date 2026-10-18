@@ -53,7 +53,6 @@ export default function SuitesManagementScreen() {
         .from('rooms')
         .select('*')
         .eq('room_type', 'SUITE')
-        .is('deleted_at', null)
         .order('display_order');
       if (error) throw error;
       const { data: allocs, error: allocErr } = await supabase
@@ -178,7 +177,7 @@ export default function SuitesManagementScreen() {
                 <Text style={[styles.subtitle, { color: colors.muted }]}>Booked stays</Text>
                 {stays.map((st) => (
                   <Text key={st.id} style={{ color: colors.text, fontSize: typography.sm }}>
-                    {st.checkIn} → {st.checkOut}
+                    {st.checkIn} (12 PM) → {st.checkOut} (12 PM)
                   </Text>
                 ))}
               </View>
@@ -203,7 +202,7 @@ export default function SuitesManagementScreen() {
         <Dialog
           visible={showBookDialog}
           title="Direct VVIP Suite Booking"
-          message="Direct allocation for AM / Air Chief Marshal / VVIP. Creates a dedicated suite booking."
+          message="Direct allocation for AM / Air Chief Marshal / VVIP. Standard 12:00 PM Check-In / 12:00 PM Check-Out applies."
           confirmLabel="Confirm Suite Allotment"
           confirmVariant="primary"
           disabled={!datesValid}

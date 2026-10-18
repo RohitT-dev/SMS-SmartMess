@@ -250,7 +250,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
     assert.strictEqual(insights.dailyAverage, 55.1);
     assert.strictEqual(insights.peakDay, '2026-10-10'); // Day 10
     assert.strictEqual(insights.peakCount, 71);
-    assert.strictEqual(insights.msaPiSharePercentage, 62);
+    assert.strictEqual(insights.mfaPiSharePercentage, 62);
     assert.strictEqual(insights.bedsTotal, 92);
     assert.strictEqual(insights.peakOccupancyPercentage, 77);
     assert.ok(insights.writtenInsights.length >= 3);
@@ -274,6 +274,15 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
     };
     const parsed = GuestPiiSchema.parse(valid);
     assert.strictEqual(parsed.name, 'Major General V. Rao');
+
+    // ID number is now optional; Aadhaar/Passport is not required
+    const withoutId = {
+      name: 'Major General V. Rao',
+      phone: '+91 9876543210',
+    };
+    const parsedWithoutId = GuestPiiSchema.parse(withoutId);
+    assert.strictEqual(parsedWithoutId.name, 'Major General V. Rao');
+    assert.strictEqual(parsedWithoutId.idNumber, null);
 
     assert.throws(() => {
       GuestPiiSchema.parse({ name: '' });

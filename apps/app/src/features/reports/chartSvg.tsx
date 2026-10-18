@@ -20,19 +20,19 @@ export const ChartSvg: React.FC<ChartSvgProps> = ({
   // Group data by day and category
   const daysMap = new Map<
     string,
-    { msa: number; pi: number; leave: number; td: number; suite: number; total: number }
+    { mfa: number; pi: number; leave: number; td: number; suite: number; total: number }
   >();
 
   for (const row of data) {
     let dayEntry = daysMap.get(row.day);
     if (!dayEntry) {
-      dayEntry = { msa: 0, pi: 0, leave: 0, td: 0, suite: 0, total: 0 };
+      dayEntry = { mfa: 0, pi: 0, leave: 0, td: 0, suite: 0, total: 0 };
       daysMap.set(row.day, dayEntry);
     }
     if (row.roomType === 'SUITE') {
       dayEntry.suite += row.people;
     } else {
-      if (row.category === 'MFA') dayEntry.msa += row.people;
+      if (row.category === 'MFA') dayEntry.mfa += row.people;
       if (row.category === 'PI') dayEntry.pi += row.people;
       if (row.category === 'LEAVE') dayEntry.leave += row.people;
       if (row.category === 'TD') dayEntry.td += row.people;
@@ -54,7 +54,7 @@ export const ChartSvg: React.FC<ChartSvgProps> = ({
 
   // Category palette
   const catColors = {
-    msa: colors.navy,
+    mfa: colors.navy,
     pi: colors.blue,
     leave: colors.green,
     td: colors.orange,
@@ -100,7 +100,7 @@ export const ChartSvg: React.FC<ChartSvgProps> = ({
           let currentY = paddingTop + chartHeight;
 
           const segments = [
-            { count: entry.msa, color: catColors.msa },
+            { count: entry.mfa, color: catColors.mfa },
             { count: entry.pi, color: catColors.pi },
             { count: entry.leave, color: catColors.leave },
             { count: entry.td, color: catColors.td }

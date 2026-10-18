@@ -107,7 +107,7 @@ export function isCivilianRelation(relation: GuestRelation | null | undefined): 
 }
 export type Category = VisitorCategory;
 
-export type BookingStatus = 'CONFIRMED' | 'CANCELLED' | 'DISPLACED' | 'COMPLETED';
+export type BookingStatus = 'CONFIRMED' | 'CANCELLED' | 'DISPLACED' | 'COMPLETED' | 'PENDING_ALLOTMENT';
 
 export type AllocationStatus = 'ACTIVE' | 'RELEASED' | 'EVICTED';
 

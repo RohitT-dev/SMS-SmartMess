@@ -98,7 +98,9 @@ export default function GuestDetailsBackfillScreen() {
     try {
       const pii = parsed.data;
       const cipherEnc = encryptGuestPii(currentGuest.id, pii);
-      const blindIndex = pii.idNumber ? computeIdBlindIndex(pii.idNumber) : null;
+      const blindIndex = pii.idNumber
+        ? computeIdBlindIndex(pii.idNumber)
+        : computeIdBlindIndex(`NO_ID_${currentGuest.id}`);
 
       const { error } = await supabase.rpc('set_guest_pii', {
         p_guest_id: currentGuest.id,
@@ -108,6 +110,31 @@ export default function GuestDetailsBackfillScreen() {
       });
 
       if (error) throw error;
+
+      // Also update plain text columns on booking_guests if available
+      try {
+        await supabase.rpc('set_booking_guest_details', {
+          p_guest_id: currentGuest.id,
+          p_guest_name: pii.name,
+          p_unit: pii.unit || null,
+          p_service_number: pii.serviceNumber || null,
+          p_phone: pii.phone || null,
+        });
+      } catch {}
+
+      try {
+        await supabase
+          .from('booking_guests')
+          .update({
+            guest_name: pii.name,
+            unit: pii.unit || null,
+            service_number: pii.serviceNumber || null,
+            phone: pii.phone || null,
+            details: 'COMPLETE',
+          })
+          .eq('id', currentGuest.id);
+      } catch {}
+
       logAction('guests.details_saved', {
         entity: 'booking_guests',
         entityId: currentGuest.id,
@@ -116,6 +143,11 @@ export default function GuestDetailsBackfillScreen() {
 
       queryClient.invalidateQueries({ queryKey: ['booking_guests_to_fill', id] });
       queryClient.invalidateQueries({ queryKey: ['booking_record', id] });
+      queryClient.invalidateQueries({ queryKey: ['bookings_ledger'] });
+      queryClient.invalidateQueries({ queryKey: ['guest_pii_for_requests'] });
+      queryClient.invalidateQueries({ queryKey: ['guest_pii_for_ledger'] });
+      queryClient.invalidateQueries({ queryKey: ['guest_pii_for_past_bookings'] });
+      queryClient.invalidateQueries({ queryKey: ['past_bookings_list'] });
 
       // Move to next guest or finish
       if (currentIdx < guestList.length - 1) {
@@ -150,6 +182,7 @@ export default function GuestDetailsBackfillScreen() {
             <View style={styles.formSection}>
               <View style={[styles.badgeStrip, { backgroundColor: colors.bg }]}>
                 <Text style={[styles.badgeStripText, { color: colors.text }]}>
+                  Guest ID: <Text style={{ fontWeight: 'bold', color: colors.blue }}>{currentGuest.guest_code || 'GST-…'}</Text> •
                   <Text style={{ fontWeight: 'bold' }}>{describeGuest(currentGuest)}</Text> •
                   Status: <Text style={{ fontWeight: 'bold' }}>{currentGuest.details}</Text>
                 </Text>
@@ -183,8 +216,8 @@ export default function GuestDetailsBackfillScreen() {
                 label={isCivilian ? 'ID / Aadhaar / Passport Number (optional)' : 'Official ID / Aadhaar / Passport Number *'}
                 value={formData.idNumber || ''}
                 onChangeText={(text) => setFormData({ ...formData, idNumber: text })}
-                placeholder="Required for exact blind index lookup"
-                hint="Used to derive exact-match blind search index"
+                placeholder="Optional (Aadhaar, Passport, Voter ID...)"
+                hint="Optional reference number (stored encrypted)"
                 error={fieldErrors.idNumber}
               />
 

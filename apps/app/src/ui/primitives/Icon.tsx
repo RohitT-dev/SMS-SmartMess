@@ -38,6 +38,9 @@ const PATHS = {
   check: ['M5 12.5l4.5 4.5L19 7'],
   hourglass: ['M7 3h10', 'M7 21h10', 'M8 3v3a4 4 0 0 0 8 0V3', 'M8 21v-3a4 4 0 0 1 8 0v3'],
   logout: ['M10 4H5v16h5', 'M15 8l4 4-4 4', 'M19 12H9'],
+  calendar: ['M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z', 'M16 2v4', 'M8 2v4', 'M3 10h18'],
+  clipboard: ['M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2', 'M9 2h6a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z', 'M9 12h6', 'M9 16h6'],
+  archive: ['M21 8v13H3V8', 'M1 3h22v5H1z', 'M10 12h4'],
 } as const;
 
 // react-native-svg forwards unknown props to the DOM on web, where the native

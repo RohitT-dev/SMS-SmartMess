@@ -27,7 +27,7 @@ export function reportInsights(
       dailyAverage: 0,
       peakDay: '',
       peakCount: 0,
-      msaPiSharePercentage: 0,
+      mfaPiSharePercentage: 0,
       bedsTotal,
       peakOccupancyPercentage: 0,
       denialCount,
@@ -37,7 +37,7 @@ export function reportInsights(
 
   // Aggregate by day and category
   const dayTotals = new Map<string, number>();
-  let msaTotal = 0;
+  let mfaTotal = 0;
   let piTotal = 0;
   let overallTotal = 0;
 
@@ -49,7 +49,7 @@ export function reportInsights(
       dayTotals.set(row.day, currentDay + row.people);
 
       overallTotal += row.people;
-      if (row.category === 'MFA') msaTotal += row.people;
+      if (row.category === 'MFA') mfaTotal += row.people;
       if (row.category === 'PI') piTotal += row.people;
     }
   }
@@ -67,8 +67,8 @@ export function reportInsights(
     }
   }
 
-  const msaPiSharePercentage =
-    overallTotal > 0 ? Math.round(((msaTotal + piTotal) / overallTotal) * 100) : 0;
+  const mfaPiSharePercentage =
+    overallTotal > 0 ? Math.round(((mfaTotal + piTotal) / overallTotal) * 100) : 0;
 
   const peakOccupancyPercentage =
     bedsTotal > 0 ? Math.round((peakCount / bedsTotal) * 100) : 0;
@@ -76,7 +76,7 @@ export function reportInsights(
   const writtenInsights: string[] = [
     `Total accommodation volume reached ${overallTotal} guest-days over ${numDays} days, averaging ${dailyAverage.toFixed(1)} personnel per day.`,
     `Peak occupancy occurred on ${peakDay || 'N/A'} with ${peakCount} guests in residence (${peakOccupancyPercentage}% of total ${bedsTotal} beds).`,
-    `Priority categories (BA MFA and Posted In) constituted ${msaPiSharePercentage}% of total guest-days.`
+    `Priority categories (BA MFA and Posted In) constituted ${mfaPiSharePercentage}% of total guest-days.`
   ];
 
   if (denialCount > 0) {
@@ -95,7 +95,7 @@ export function reportInsights(
     dailyAverage,
     peakDay,
     peakCount,
-    msaPiSharePercentage,
+    mfaPiSharePercentage,
     bedsTotal,
     peakOccupancyPercentage,
     denialCount,

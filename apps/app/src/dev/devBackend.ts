@@ -8,6 +8,9 @@
  * Not a security boundary and not a substitute for the pgTAP suite.
  */
 
+import type { BookingStatus, GuestPii } from '@sms/core';
+import { decryptEnvelope, deriveAllSubkeys, getSessionKey } from '@sms/crypto';
+
 type Row = Record<string, any>;
 
 const randomUUID = (): string =>
@@ -66,6 +69,11 @@ function parseRange(r: string): [string, string] {
 const rangeStr = (a: string, b: string) => `[${a},${b})`;
 const overlaps = (a: [string, string], b: [string, string]) => a[0] < b[1] && b[0] < a[1];
 
+let nextGuestCodeNum = 1001;
+export function generateGuestCode(): string {
+  return `GST-${String(nextGuestCodeNum++).padStart(4, '0')}`;
+}
+
 function emptyDb(): Tables {
   const mk = (u: (typeof DEV_USERS)[DevUserKey]) => ({
     id: u.id,
@@ -77,6 +85,7 @@ function emptyDb(): Tables {
     updated_at: nowIso(),
     email: u.email, // dev-only convenience (real table has no email column)
   });
+  nextGuestCodeNum = 1001;
   return {
     profiles: [mk(DEV_USERS.admin), mk(DEV_USERS.clerk)],
     rooms: [],
@@ -265,9 +274,6 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       if (mismatch) throw new PgError('ERR_SHARE_RULE');
     }
 
-    // trg_allocations_closure_rule: deleted or offline rooms take no new allocations
-    if (row.status === 'ACTIVE' && (!room.is_active || room.deleted_at)) throw new PgError('ERR_ROOM_CLOSED');
-
     // trg_allocations_suite_rule
     if (room.room_type === 'SUITE') {
       if (!(isAdmin() && booking.is_suite_booking)) throw new PgError('ERR_SUITE_ONLY_ADMIN');
@@ -328,16 +334,21 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       }
     }
 
+    const isPending =
+      pBooking.status === 'PENDING_ALLOTMENT' || !pAllocs || pAllocs.length === 0;
+    const bookingStatus: BookingStatus = isPending ? 'PENDING_ALLOTMENT' : 'CONFIRMED';
+
     const bookingId = randomUUID();
     db.bookings.push({
       id: bookingId,
       category,
-      status: 'CONFIRMED',
+      status: bookingStatus,
       check_in: checkIn,
       check_out: checkOut,
       stay: rangeStr(checkIn, checkOut),
       party_size: partySize,
       is_suite_booking: isSuite,
+      preferred_room_type: pBooking.preferred_room_type ?? null,
       notes_enc: pBooking.notes_enc ?? null,
       key_version: pBooking.key_version ?? 1,
       created_by: uid(),
@@ -356,6 +367,11 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       const gid = randomUUID();
       db.booking_guests.push({
         id: gid,
+        guest_code: g.guest_code || generateGuestCode(),
+        guest_name: g.guest_name || g.name || null,
+        unit: g.unit || null,
+        service_number: g.service_number || g.serviceNumber || null,
+        phone: g.phone || null,
         booking_id: bookingId,
         seq: Number(g.seq),
         gender: g.gender,
@@ -388,7 +404,16 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       });
     }
 
-    audit('booking_created', 'bookings', bookingId, { category, party_size: partySize, is_suite: isSuite });
+    if (bookingStatus === 'PENDING_ALLOTMENT') {
+      audit('booking_request_created', 'bookings', bookingId, { category, party_size: partySize, is_suite: isSuite });
+    } else {
+      audit('booking_created', 'bookings', bookingId, { category, party_size: partySize, is_suite: isSuite });
+    }
+
+    emit('bookings');
+    emit('allocations');
+    emit('booking_guests');
+
     return bookingId;
   }
 
@@ -504,6 +529,54 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
 
     create_booking: (a) => createBooking(a.p_booking, a.p_guests, a.p_allocations),
 
+    create_booking_request: (a) =>
+      createBooking({ ...a.p_booking, status: 'PENDING_ALLOTMENT' }, a.p_guests, []),
+
+    allot_booking_rooms: (a) => {
+      need(isActiveUser() && (hasPerm('create_booking') || isAdmin()));
+      const b = bookingById(a.p_booking_id);
+      if (!b) throw new PgError('ERR_NOT_FOUND');
+      if (b.status !== 'PENDING_ALLOTMENT') throw new PgError('ERR_BOOKING_NOT_PENDING');
+      if (b.is_suite_booking && !isAdmin()) throw new PgError('ERR_SUITE_ONLY_ADMIN');
+      if (!a.p_allocations || a.p_allocations.length === 0) throw new PgError('ERR_EMPTY_ALLOCATIONS');
+
+      for (const al of a.p_allocations) {
+        let guestId = al.guest_id || null;
+        if (!guestId && al.guest_seq != null) {
+          const bg = db.booking_guests.find((g) => g.booking_id === b.id && g.seq === Number(al.guest_seq));
+          if (bg) guestId = bg.id;
+        }
+        if (!guestId) {
+          const singleGuest = db.booking_guests.find((g) => g.booking_id === b.id);
+          if (singleGuest) guestId = singleGuest.id;
+        }
+        if (!guestId) throw new PgError('ERR_INVALID_GUEST');
+
+        insertAllocation({
+          id: randomUUID(),
+          booking_id: b.id,
+          guest_id: guestId,
+          room_id: al.room_id,
+          bed_slot: Number(al.bed_slot),
+          stay: b.stay,
+          status: 'ACTIVE',
+          created_by: uid(),
+          created_at: nowIso(),
+          updated_at: nowIso(),
+          deleted_at: null,
+        });
+      }
+
+      b.status = 'CONFIRMED';
+      b.updated_at = nowIso();
+      audit('booking_allotted', 'bookings', b.id, { allocations_count: a.p_allocations.length });
+      emit('bookings');
+      emit('allocations');
+      emit('booking_guests');
+      emit('rooms');
+      return null;
+    },
+
     cancel_booking: (a) => {
       need(isActiveUser() && hasPerm('cancel_booking'));
       const b = bookingById(a.p_id);
@@ -517,6 +590,23 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
         if (x.booking_id === a.p_id && x.status === 'ACTIVE') x.status = 'RELEASED';
       });
       audit('booking_cancelled', 'bookings', a.p_id, {});
+      emit('bookings');
+      emit('allocations');
+      return null;
+    },
+
+    set_booking_guest_details: (a) => {
+      need(isActiveUser() && (hasPerm('create_booking') || hasPerm('enter_guest_details') || isAdmin()));
+      const g = guestById(a.p_guest_id);
+      if (!g) {
+        throw new PgError('Guest not found', 'P0001');
+      }
+      g.guest_name = a.p_guest_name;
+      g.unit = a.p_unit;
+      g.service_number = a.p_service_number;
+      g.phone = a.p_phone;
+      g.details = 'COMPLETE';
+      emit('booking_guests');
       return null;
     },
 
@@ -526,7 +616,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
         throw new PgError('insert or update on table "guest_pii" violates foreign key constraint "guest_pii_guest_id_fkey"', '23503');
       }
       const existing = db.guest_pii.find((p) => p.guest_id === a.p_guest_id);
-      const next = { guest_id: a.p_guest_id, pii_enc: a.p_pii_enc, id_blind_index: a.p_blind, key_version: a.p_key_version, updated_by: uid(), updated_at: nowIso() };
+      const next = { guest_id: a.p_guest_id, pii_enc: a.p_pii_enc, id_blind_index: a.p_blind ?? null, key_version: a.p_key_version, updated_by: uid(), updated_at: nowIso() };
       if (existing) Object.assign(existing, next);
       else db.guest_pii.push(next);
       guestById(a.p_guest_id)!.details = 'COMPLETE';
@@ -554,6 +644,94 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       return [...ids].map((booking_id) => ({ booking_id }));
     },
 
+    search_bookings_and_guests: (a) => {
+      need(isActiveUser());
+      const q = String(a.p_query ?? '').trim().toLowerCase();
+      if (!q) return [];
+      const ids = new Set<string>();
+
+      // Match guest_code, rank_code, guest_name, unit, service_number, phone
+      db.booking_guests.forEach((g) => {
+        if (
+          (g.guest_code && g.guest_code.toLowerCase().includes(q)) ||
+          (g.rank_code && g.rank_code.toLowerCase().includes(q)) ||
+          (g.guest_name && g.guest_name.toLowerCase().includes(q)) ||
+          (g.unit && g.unit.toLowerCase().includes(q)) ||
+          (g.service_number && g.service_number.toLowerCase().includes(q)) ||
+          (g.phone && g.phone.toLowerCase().includes(q))
+        ) {
+          ids.add(g.booking_id);
+        }
+      });
+
+      // Match room names and room display order
+      db.rooms.forEach((r) => {
+        const rName = r.name || `Room ${r.display_order}`;
+        if (rName.toLowerCase().includes(q) || String(r.display_order) === q) {
+          db.allocations.forEach((al) => {
+            if (al.room_id === r.id && al.status === 'ACTIVE') {
+              ids.add(al.booking_id);
+            }
+          });
+        }
+      });
+
+      // Match booking id, category
+      db.bookings.forEach((b) => {
+        if (
+          b.id.toLowerCase().includes(q) ||
+          b.category.toLowerCase().includes(q)
+        ) {
+          ids.add(b.id);
+        }
+      });
+
+      // Match blind index
+      db.guest_pii.forEach((p) => {
+        if (p.id_blind_index && p.id_blind_index.toLowerCase() === q) {
+          const g = guestById(p.guest_id);
+          if (g) ids.add(g.booking_id);
+        }
+      });
+
+      // Match decrypted guest PII if session is unlocked
+      try {
+        const session = getSessionKey();
+        if (session) {
+          const subkeys = deriveAllSubkeys(session.teamKey);
+          db.guest_pii.forEach((p) => {
+            if (!p.pii_enc) return;
+            try {
+              const aad = `guest_pii.pii_enc.${p.guest_id}`;
+              const json = decryptEnvelope({
+                envelope: p.pii_enc,
+                subkey: subkeys.pii,
+                aad,
+                allowedKeyVersions: [session.version],
+              });
+              const pii = JSON.parse(json) as GuestPii;
+              if (
+                (pii.name && pii.name.toLowerCase().includes(q)) ||
+                (pii.phone && pii.phone.toLowerCase().includes(q)) ||
+                (pii.serviceNumber && pii.serviceNumber.toLowerCase().includes(q)) ||
+                (pii.unit && pii.unit.toLowerCase().includes(q)) ||
+                (pii.idNumber && pii.idNumber.toLowerCase().includes(q))
+              ) {
+                const g = guestById(p.guest_id);
+                if (g) ids.add(g.booking_id);
+              }
+            } catch {
+              // ignore decryption failure
+            }
+          });
+        }
+      } catch {
+        // ignore session error
+      }
+
+      return [...ids].map((booking_id) => ({ booking_id, match_source: 'general' }));
+    },
+
     daily_room_state: (a) => {
       need(isActiveUser());
       const admin = isAdmin();
@@ -575,13 +753,14 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
                 allocationId: al.id,
                 bookingId: al.booking_id,
                 bedSlot: al.bed_slot,
-                gender: g.gender,
-                rankCode: g.rank_code,
-                relation: g.relation,
-                category: b.category,
-                bookingStatus: b.status,
-                checkIn: b.check_in,
-                checkOut: b.check_out,
+                gender: g?.gender,
+                rankCode: g?.rank_code,
+                relation: g?.relation,
+                guestCode: g?.guest_code ?? 'GST-0000',
+                category: b?.category,
+                bookingStatus: b?.status,
+                checkIn: b?.check_in,
+                checkOut: b?.check_out,
               };
             });
           out.push({
@@ -791,27 +970,6 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       return null;
     },
 
-    delete_room: (a) => {
-      need(isAdmin());
-      const room = db.rooms.find((r) => r.id === a.p_room_id && !r.deleted_at);
-      if (!room) throw new PgError('ERR_NOT_FOUND');
-      const today = todayUtc();
-      if (
-        db.allocations.some(
-          (x) => x.room_id === room.id && x.status === 'ACTIVE' && parseRange(x.stay)[1] > today,
-        )
-      ) {
-        throw new PgError('ERR_ROOM_HAS_BOOKINGS');
-      }
-      db.room_closures = db.room_closures.filter(
-        (c) => c.room_id !== room.id || parseRange(c.period)[1] <= today,
-      );
-      room.is_active = false;
-      room.deleted_at = new Date().toISOString();
-      audit('room_deleted', 'rooms', room.id, { room_type: room.room_type });
-      return null;
-    },
-
     set_user_role: (a) => {
       need(isAdmin());
       const target = db.profiles.find((p) => p.id === a.p_user_id);
@@ -839,6 +997,118 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       audit('permissions_updated', 'profiles', a.p_user_id, { permissions: a.p_permissions });
       return null;
     },
+
+    delete_room: (a) => {
+      need(isActiveUser() && (hasPerm('manage_rooms') || isAdmin()));
+      const r = roomById(a.p_room_id);
+      if (!r || r.deleted_at) throw new PgError('ERR_NOT_FOUND');
+      if (r.room_type === 'SUITE' && !isAdmin()) throw new PgError('ERR_SUITE_ONLY_ADMIN');
+
+      const hasActive = db.allocations.some(
+        (al) => al.room_id === a.p_room_id && al.status === 'ACTIVE' && parseRange(al.stay)[1] > todayUtc()
+      );
+      if (hasActive) {
+        throw new PgError('ERR_ROOM_HAS_ACTIVE_BOOKINGS');
+      }
+
+      r.is_active = false;
+      r.deleted_at = nowIso();
+      r.updated_at = nowIso();
+
+      db.room_closures = db.room_closures.filter(
+        (c) => !(c.room_id === a.p_room_id && parseRange(c.period)[0] >= todayUtc())
+      );
+
+      audit('room_deleted', 'rooms', a.p_room_id, { room_type: r.room_type });
+      emit('rooms');
+      return null;
+    },
+
+    update_booking_dates: (a) => {
+      need(isActiveUser() && (hasPerm('create_booking') || isAdmin()));
+      const b = bookingById(a.p_booking_id);
+      if (!b) throw new PgError('ERR_NOT_FOUND');
+      if (b.status !== 'CONFIRMED' && b.status !== 'PENDING_ALLOTMENT') throw new PgError('ERR_BOOKING_NOT_ACTIVE');
+      if (b.is_suite_booking && !isAdmin()) throw new PgError('ERR_SUITE_ONLY_ADMIN');
+
+      const newCheckIn = a.p_new_check_in;
+      const newCheckOut = a.p_new_check_out;
+      if (!newCheckIn || !newCheckOut || !(newCheckOut > newCheckIn)) {
+        throw new PgError('ERR_INVALID_DATES');
+      }
+
+      const oldCheckIn = b.check_in;
+      const oldCheckOut = b.check_out;
+      const today = todayUtc();
+
+      if (oldCheckIn <= today) {
+        if (newCheckIn !== oldCheckIn) {
+          throw new PgError('ERR_CANNOT_CHANGE_PAST_CHECKIN');
+        }
+        if (newCheckOut < today) {
+          throw new PgError('ERR_INVALID_DATES');
+        }
+      } else {
+        if (newCheckIn < today && !isAdmin()) {
+          throw new PgError('ERR_INVALID_DATES: Clerks cannot backdate bookings');
+        }
+      }
+
+      const activeAllocs = db.allocations.filter((al) => al.booking_id === b.id && al.status === 'ACTIVE');
+      const newRange: [string, string] = [newCheckIn, newCheckOut];
+
+      for (const al of activeAllocs) {
+        const closed = db.room_closures.some(
+          (c) => c.room_id === al.room_id && overlaps(parseRange(c.period), newRange)
+        );
+        if (closed) throw new PgError('ERR_ROOM_CLOSED');
+
+        const bedTaken = db.allocations.some(
+          (other) =>
+            other.id !== al.id &&
+            other.status === 'ACTIVE' &&
+            other.room_id === al.room_id &&
+            other.bed_slot === al.bed_slot &&
+            overlaps(parseRange(other.stay), newRange)
+        );
+        if (bedTaken) {
+          throw new PgError('conflicting key value violates exclusion constraint "no_double_booking"', '23P01');
+        }
+
+        const guestDouble = db.allocations.some(
+          (other) =>
+            other.id !== al.id &&
+            other.status === 'ACTIVE' &&
+            other.guest_id === al.guest_id &&
+            overlaps(parseRange(other.stay), newRange)
+        );
+        if (guestDouble) {
+          throw new PgError('conflicting key value violates exclusion constraint "one_bed_per_guest"', '23P01');
+        }
+      }
+
+      b.check_in = newCheckIn;
+      b.check_out = newCheckOut;
+      b.stay = rangeStr(newCheckIn, newCheckOut);
+      b.updated_at = nowIso();
+
+      for (const al of activeAllocs) {
+        al.stay = rangeStr(newCheckIn, newCheckOut);
+        al.updated_at = nowIso();
+      }
+
+      audit('booking_dates_updated', 'bookings', b.id, {
+        old_check_in: oldCheckIn,
+        old_check_out: oldCheckOut,
+        new_check_in: newCheckIn,
+        new_check_out: newCheckOut,
+      });
+
+      emit('bookings');
+      emit('allocations');
+
+      return null;
+    },
   };
 
   for (const name of ['begin_rotation', 'reencrypt_batch', 'admin_page_guest_pii', 'finish_rotation_with_code']) {
@@ -859,7 +1129,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       case 'profiles':
         return db.profiles.filter((p) => admin || p.id === uid());
       case 'rooms':
-        return db.rooms.filter((r) => r.room_type !== 'SUITE' || admin);
+        return db.rooms.filter((r) => (r.room_type !== 'SUITE' || admin) && !r.deleted_at);
       case 'room_closures':
         return db.room_closures.filter((c) => admin || roomById(c.room_id)?.room_type !== 'SUITE');
       case 'devices':
@@ -923,6 +1193,21 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     lt(c: string, v: any) { this.filters.push((r) => r[c] < v); return this; }
     lte(c: string, v: any) { this.filters.push((r) => r[c] <= v); return this; }
     in(c: string, vs: any[]) { this.filters.push((r) => vs.includes(r[c])); return this; }
+    not(c: string, op: string, v: any) {
+      if (op === 'in') {
+        const list = Array.isArray(v)
+          ? v
+          : typeof v === 'string'
+            ? v.replace(/^\(|\)$/g, '').split(',').map((s) => s.replace(/^"|"$/g, '').trim())
+            : [];
+        this.filters.push((r) => !list.includes(r[c]));
+      } else if (op === 'eq') {
+        this.filters.push((r) => r[c] !== v);
+      } else if (op === 'is') {
+        this.filters.push((r) => (v === null ? r[c] != null : r[c] !== v));
+      }
+      return this;
+    }
     is(c: string, v: any) { this.filters.push((r) => (v === null ? r[c] == null : r[c] === v)); return this; }
     order(col: string, o?: { ascending?: boolean }) { this.orders.push({ col, asc: o?.ascending !== false }); return this; }
     limit(n: number) { this._limit = n; return this; }
@@ -933,6 +1218,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     private run(): { data: any; error: any; count?: number | null } {
       try {
         if (this.op === 'insert') return this.runInsert();
+        if (this.op === 'update') return this.runUpdate();
         if (this.op !== 'select') throw new PgError(`permission denied for table ${this.table}`, '42501');
         let rows = visibleRows(this.table).filter((r) => this.filters.every((f) => f(r)));
         this.orders.forEach(({ col, asc }) => {
@@ -1018,6 +1304,43 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       }
     }
 
+    private runUpdate() {
+      const snap = clone(db);
+      try {
+        if (this.table !== 'rooms' && this.table !== 'booking_guests') {
+          throw new PgError(`permission denied for table ${this.table}`, '42501');
+        }
+        const rlsDenied = () =>
+          new PgError(`new row violates row-level security policy for table "${this.table}"`, '42501');
+
+        if (this.table === 'booking_guests') {
+          if (!isActiveUser()) throw rlsDenied();
+          const targets = db.booking_guests.filter((r) => this.filters.every((f) => f(r)));
+          for (const r of targets) {
+            Object.assign(r, this.payload);
+          }
+          persist();
+          emit('booking_guests');
+          return this.finish(targets.map((r) => clone(project(this.table, r, this.selectNode))), targets.length);
+        }
+
+        if (!(isActiveUser() && hasPerm('manage_rooms'))) throw rlsDenied();
+
+        const targets = db.rooms.filter((r) => this.filters.every((f) => f(r)));
+        for (const r of targets) {
+          if (r.room_type === 'SUITE' && !isAdmin()) throw rlsDenied();
+          Object.assign(r, this.payload);
+          r.updated_at = nowIso();
+        }
+        persist();
+        emit(this.table);
+        return this.finish(targets.map((r) => clone(project(this.table, r, this.selectNode))), targets.length);
+      } catch (e: any) {
+        db = snap;
+        return { data: null, error: toError(e) };
+      }
+    }
+
     then<T1 = any, T2 = never>(
       onfulfilled?: ((value: any) => T1 | PromiseLike<T1>) | null,
       onrejected?: ((reason: any) => T2 | PromiseLike<T2>) | null,
@@ -1045,7 +1368,9 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       const data = fn(args);
       persist();
       // Only booking writes notify realtime subscribers; read RPCs must not (they'd refetch forever).
-      if (['create_booking', 'cancel_booking', 'approve_eviction'].includes(name)) ['allocations', 'bookings'].forEach(emit);
+      if (['create_booking', 'cancel_booking', 'approve_eviction', 'allot_booking_rooms', 'create_booking_request'].includes(name)) {
+        ['allocations', 'bookings', 'booking_guests', 'rooms'].forEach(emit);
+      }
       return { data: data === undefined ? null : clone(data), error: null };
     } catch (e: any) {
       db = snap;

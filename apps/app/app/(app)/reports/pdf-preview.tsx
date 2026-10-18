@@ -23,7 +23,7 @@ export default function PdfPreviewScreen() {
       peakDay: 'N/A',
       peakCount: 0,
       peakOccupancyPercentage: 0,
-      msaPiSharePercentage: 0,
+      mfaPiSharePercentage: 0,
       bedsTotal: 92,
       denialCount: 0,
       writtenInsights: [],
@@ -83,7 +83,7 @@ export default function PdfPreviewScreen() {
             </View>
             <View style={styles.statBox}>
               <Text style={styles.statLabel}>PRIORITY SHARE (MFA+PI)</Text>
-              <Text style={styles.statVal}>{insights.msaPiSharePercentage}%</Text>
+              <Text style={styles.statVal}>{insights.mfaPiSharePercentage}%</Text>
             </View>
           </View>
 
