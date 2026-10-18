@@ -2,6 +2,7 @@ import { Platform } from 'react-native';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import { supabase } from '../../lib/supabase';
+import { escapeHtml } from './pastBookingsHtml';
 
 export interface GridPdfOccupant {
   allocationId?: string;
@@ -62,7 +63,7 @@ export function buildGridHtml({
   }
 
   const roomHeaders = rooms.map(
-    (r) => `<th class="room-col"><div class="r-name">${r.name}</div><div class="r-type">${r.roomType}</div></th>`,
+    (r) => `<th class="room-col"><div class="r-name">${escapeHtml(r.name)}</div><div class="r-type">${escapeHtml(r.roomType)}</div></th>`,
   ).join('');
 
   const rows = dates
@@ -95,7 +96,7 @@ export function buildGridHtml({
 
               const guestCode = occ.guestCode || 'GST-…';
               const rank = occ.rankCode ? ` ${occ.rankCode}` : '';
-              return `<div class="badge ${cls}"><span class="cat-tag">${cat}</span> ${guestCode}${rank}</div>`;
+              return `<div class="badge ${cls}"><span class="cat-tag">${escapeHtml(cat)}</span> ${escapeHtml(guestCode)}${escapeHtml(rank)}</div>`;
             })
             .join('');
 
@@ -111,7 +112,7 @@ export function buildGridHtml({
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Room Occupancy Grid Matrix - ${fromDate} to ${toDate}</title>
+  <title>Room Occupancy Grid Matrix - ${escapeHtml(fromDate)} to ${escapeHtml(toDate)}</title>
   <style>
     @page {
       size: A4 landscape;
@@ -309,8 +310,8 @@ export function buildGridHtml({
 <body>
   <div class="header">
     <div>
-      <h1 class="title">${messName} - Room Occupancy Matrix</h1>
-      <div class="subtitle">Custom Date Range: <strong>${fromDate}</strong> to <strong>${toDate}</strong> (${dates.length} Days) • Rooms (X-Axis) vs Dates (Y-Axis)</div>
+      <h1 class="title">${escapeHtml(messName)} - Room Occupancy Matrix</h1>
+      <div class="subtitle">Custom Date Range: <strong>${escapeHtml(fromDate)}</strong> to <strong>${escapeHtml(toDate)}</strong> (${dates.length} Days) • Rooms (X-Axis) vs Dates (Y-Axis)</div>
     </div>
     <div class="meta">
       <div>Official Ledger Document</div>
