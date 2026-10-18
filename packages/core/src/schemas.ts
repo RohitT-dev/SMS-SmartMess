@@ -1,6 +1,6 @@
 import type { GuestDemand, GuestPii } from './types.ts';
-import type { RoomType, VisitorCategory } from './constants.ts';
-import { CATEGORIES, RANKS } from './constants.ts';
+import type { GuestRelation, RoomType, VisitorCategory } from './constants.ts';
+import { CATEGORIES, RANKS, isCivilianRelation } from './constants.ts';
 
 export interface ValidationSuccess<T> {
   success: true;
@@ -57,18 +57,45 @@ export const GuestPiiSchema: SchemaValidator<GuestPii> = {
       };
     }
 
-    return {
-      success: true,
-      data: {
-        name: (val.name as string).trim(),
-        serviceNumber: typeof val.serviceNumber === 'string' && val.serviceNumber.trim().length > 0 ? val.serviceNumber.trim() : null,
-        idNumber: typeof val.idNumber === 'string' && val.idNumber.trim().length > 0 ? val.idNumber.trim() : null,
-        idType: typeof val.idType === 'string' && val.idType.trim().length > 0 ? val.idType.trim() : null,
-        phone: (val.phone as string).trim(),
-        unit: typeof val.unit === 'string' && val.unit.trim().length > 0 ? val.unit.trim() : null,
-        notes: typeof val.notes === 'string' && val.notes.trim().length > 0 ? val.notes.trim() : null
-      }
-    };
+    return { success: true, data: normalizePii(val) };
+  }
+};
+
+const optionalTrimmed = (v: unknown): string | null =>
+  typeof v === 'string' && v.trim().length > 0 ? v.trim() : null;
+
+function normalizePii(val: Record<string, unknown>): GuestPii {
+  return {
+    name: (val.name as string).trim(),
+    serviceNumber: optionalTrimmed(val.serviceNumber),
+    idNumber: optionalTrimmed(val.idNumber),
+    idType: optionalTrimmed(val.idType),
+    phone: optionalTrimmed(val.phone),
+    unit: optionalTrimmed(val.unit),
+    notes: optionalTrimmed(val.notes)
+  };
+}
+
+/** Civilians (family and other guests without rank): only the name is required. */
+export const CivilianPiiSchema: SchemaValidator<GuestPii> = {
+  parse(input: unknown): GuestPii {
+    const res = this.safeParse(input);
+    if (!res.success) throw new Error(res.error.message);
+    return res.data;
+  },
+  safeParse(input: unknown): ValidationResult<GuestPii> {
+    if (!input || typeof input !== 'object') {
+      return {
+        success: false,
+        error: { issues: [{ path: [], message: 'Expected object' }], message: 'Expected object' }
+      };
+    }
+    const val = input as Record<string, unknown>;
+    if (!val.name || typeof val.name !== 'string' || val.name.trim().length === 0) {
+      const issues = [{ path: ['name'], message: 'Guest name is required' }];
+      return { success: false, error: { issues, message: 'name: Guest name is required' } };
+    }
+    return { success: true, data: normalizePii(val) };
   }
 };
 
@@ -122,14 +149,24 @@ export const CreateBookingRequestSchema: SchemaValidator<CreateBookingInput> = {
     if (!Array.isArray(val.guests) || val.guests.length !== partySize) {
       issues.push({ path: ['guests'], message: 'Guest count must match party size' });
     } else {
+      let primaries = 0;
       val.guests.forEach((g: Record<string, unknown>, idx: number) => {
+        const relation = (g.relation as GuestRelation | undefined) ?? (idx === 0 ? 'PRIMARY' : g.rankCode ? 'SERVICE' : 'OTHER');
+        if (relation === 'PRIMARY') primaries++;
         if (!g.gender || (g.gender !== 'M' && g.gender !== 'F')) {
           issues.push({ path: ['guests', String(idx), 'gender'], message: 'Gender must be M or F' });
         }
-        if (!g.rankCode || !RANKS.some((r) => r.code === g.rankCode)) {
+        if (isCivilianRelation(relation)) {
+          if (g.rankCode != null) {
+            issues.push({ path: ['guests', String(idx), 'rankCode'], message: 'Civilians have no rank' });
+          }
+        } else if (!g.rankCode || !RANKS.some((r) => r.code === g.rankCode)) {
           issues.push({ path: ['guests', String(idx), 'rankCode'], message: 'Invalid rank code' });
         }
       });
+      if (primaries !== 1) {
+        issues.push({ path: ['guests'], message: 'A booking needs exactly one primary ranked person' });
+      }
     }
 
     if (issues.length > 0) {

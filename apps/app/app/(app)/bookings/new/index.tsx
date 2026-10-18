@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -32,13 +32,31 @@ import {
   getActiveKeyVersion,
 } from '../../../../src/features/crypto-session/cryptoSession';
 import { persistGuestDetails } from '../../../../src/features/bookings/guestDetails';
+import { guestRowsPayload } from '../../../../src/features/bookings/planBooking';
 import {
   RANKS,
+  RELATION_LABELS,
+  isCivilianRelation,
   type Category,
   type Gender,
+  type GuestRelation,
   type RankCode,
   type RoomType,
 } from '@sms/core';
+
+/** A person travelling with the primary guest: another service member or a civilian. */
+interface Companion {
+  relation: GuestRelation;
+  gender: Gender;
+  /** Null for civilians. */
+  rankCode: RankCode | null;
+  name: string;
+  phone: string;
+}
+
+const COMPANION_RELATION_OPTIONS = (['SPOUSE', 'CHILD', 'PARENT', 'OTHER', 'SERVICE'] as const).map(
+  (r) => ({ label: r === 'SERVICE' ? 'Service member (ranked)' : RELATION_LABELS[r], value: r }),
+);
 
 interface SavedRequestConfirmation {
   bookingId: string;
@@ -55,6 +73,8 @@ interface SavedRequestConfirmation {
   checkOut: string;
   preferredRoomType: RoomType | null;
   nights: number;
+  /** People travelling with the primary guest, saved on the same booking. */
+  companions: Companion[];
 }
 
 const CATEGORY_OPTIONS = [
@@ -137,6 +157,9 @@ export default function NewBookingWizardScreen() {
   const [currentIdNumber, setCurrentIdNumber] = useState<string>('');
   const [currentNotes, setCurrentNotes] = useState<string>('');
 
+  // Party: further service members and civilians (family) booked together with the primary guest.
+  const [companions, setCompanions] = useState<Companion[]>([]);
+
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -159,7 +182,74 @@ export default function NewBookingWizardScreen() {
     setCurrentUnit('');
     setCurrentIdNumber('');
     setCurrentNotes('');
+    setCompanions([]);
   };
+
+  const handleAddCivilian = () => {
+    if (companions.length >= 39) return;
+    const hasSpouse = companions.some((c) => c.relation === 'SPOUSE');
+    setCompanions([
+      ...companions,
+      {
+        relation: hasSpouse ? 'CHILD' : 'SPOUSE',
+        gender: currentGender === 'M' ? 'F' : 'M',
+        rankCode: null,
+        name: '',
+        phone: '',
+      },
+    ]);
+  };
+
+  const handleAddServiceMember = () => {
+    if (companions.length >= 39) return;
+    // Starts as a copy of the primary: colleagues travelling together usually match.
+    setCompanions([
+      ...companions,
+      { relation: 'SERVICE', gender: currentGender, rankCode: currentRank, name: '', phone: '' },
+    ]);
+  };
+
+  const handleUpdateCompanion = (index: number, patch: Partial<Companion>) => {
+    setCompanions(companions.map((c, i) => (i === index ? { ...c, ...patch } : c)));
+  };
+
+  const handleChangeRelation = (index: number, relation: GuestRelation) => {
+    handleUpdateCompanion(index, {
+      relation,
+      rankCode: isCivilianRelation(relation) ? null : (companions[index].rankCode ?? currentRank),
+    });
+  };
+
+  const handleRemoveCompanion = (index: number) => {
+    setCompanions(companions.filter((_, i) => i !== index));
+  };
+
+  /** The whole party in booking order: the primary guest first. */
+  const buildParty = (resolvedName: string, resolvedServiceNo: string | null, resolvedUnit: string | null, resolvedPhone: string | null) => [
+    {
+      gender: currentGender,
+      rankCode: currentRank as RankCode | null,
+      relation: 'PRIMARY' as GuestRelation,
+      name: resolvedName,
+      serviceNumber: resolvedServiceNo,
+      unit: resolvedUnit,
+      phone: resolvedPhone,
+    },
+    ...companions.map((c) => ({
+      gender: c.gender,
+      rankCode: c.rankCode,
+      relation: c.relation,
+      name: c.name.trim() || undefined,
+      serviceNumber: null,
+      unit: null,
+      phone: c.phone.trim() || null,
+    })),
+  ];
+
+  const unnamedCivilians = useMemo(
+    () => companions.filter((c) => !c.rankCode && !c.name.trim()).length,
+    [companions],
+  );
 
   const handleSaveRequest = async (andAllotNow: boolean = false) => {
     if (!datesValid) {
@@ -176,6 +266,7 @@ export default function NewBookingWizardScreen() {
       const resolvedUnit = currentUnit.trim() || null;
       const resolvedPhone = currentPhone.trim() || null;
       const prefType = preferredType === 'ANY' ? null : preferredType;
+      const party = buildParty(resolvedName, resolvedServiceNo, resolvedUnit, resolvedPhone);
 
       // 1. Create booking request in DB using standard create_booking RPC
       const { data: bookingId, error: createError } = await supabase.rpc(
@@ -185,24 +276,14 @@ export default function NewBookingWizardScreen() {
             category,
             check_in: checkIn,
             check_out: checkOut,
-            party_size: 1,
+            party_size: party.length,
             is_suite_booking: false,
             preferred_room_type: prefType,
             status: 'PENDING_ALLOTMENT',
             notes_enc: currentNotes.trim() || null,
             key_version: getActiveKeyVersion(),
           },
-          p_guests: [
-            {
-              seq: 1,
-              gender: currentGender,
-              rank_code: currentRank,
-              guest_name: resolvedName,
-              service_number: resolvedServiceNo,
-              unit: resolvedUnit,
-              phone: resolvedPhone,
-            },
-          ],
+          p_guests: guestRowsPayload(party),
           p_allocations: [],
         }
       );
@@ -249,6 +330,21 @@ export default function NewBookingWizardScreen() {
         });
       }
 
+      // 3b. Companions: store the names typed here. A civilian left unnamed is completed later
+      // from Guest Details.
+      if (party.length > 1) {
+        const { data: allRows } = await supabase
+          .from('booking_guests')
+          .select('id, seq')
+          .eq('booking_id', bookingId)
+          .order('seq', { ascending: true });
+        for (const row of (allRows ?? []) as Array<{ id: string; seq: number }>) {
+          const p = party[row.seq - 1];
+          if (!p || row.seq === 1 || !(p.rankCode || p.name)) continue;
+          await persistGuestDetails(row.id, { name: p.name, phone: p.phone });
+        }
+      }
+
       // 4. Invalidate query caches for real-time updates everywhere
       queryClient.invalidateQueries({ queryKey: ['pending_booking_requests'] });
       queryClient.invalidateQueries({ queryKey: ['bookings_ledger'] });
@@ -265,7 +361,7 @@ export default function NewBookingWizardScreen() {
       logAction('bookings.create_request', {
         entity: 'bookings',
         entityId: bookingId as string,
-        meta: { mode: 'wizard_single_request', category, checkIn, checkOut, andAllotNow },
+        meta: { mode: 'wizard_request', category, checkIn, checkOut, andAllotNow, party_size: party.length },
       });
 
       if (andAllotNow) {
@@ -278,19 +374,16 @@ export default function NewBookingWizardScreen() {
           preferredRoomType: prefType || undefined,
           preferredRoomId: targetRoomId || undefined,
           preferredBedSlot: targetBedSlot ? Number(targetBedSlot) : undefined,
-          guests: [
-            {
-              gender: currentGender,
-              rankCode: currentRank,
-              name: resolvedName,
-              serviceNumber: resolvedServiceNo,
-              unit: resolvedUnit,
-              phone: resolvedPhone,
-              idNumber: currentIdNumber.trim() || null,
-              idType: currentIdType.trim() || null,
-              notes: currentNotes.trim() || null,
-            },
-          ],
+          guests: party.map((p, i) =>
+            i === 0
+              ? {
+                  ...p,
+                  idNumber: currentIdNumber.trim() || null,
+                  idType: currentIdType.trim() || null,
+                  notes: currentNotes.trim() || null,
+                }
+              : p,
+          ),
         });
 
         router.push({
@@ -316,6 +409,7 @@ export default function NewBookingWizardScreen() {
         checkOut,
         preferredRoomType: prefType,
         nights,
+        companions,
       });
     } catch (err: any) {
       setSubmitError(userErrorMessage(err, 'Failed to save booking request'));
@@ -338,11 +432,19 @@ export default function NewBookingWizardScreen() {
         {
           gender: savedRequest.gender,
           rankCode: savedRequest.rankCode,
+          relation: 'PRIMARY',
           name: savedRequest.guestName,
           serviceNumber: savedRequest.serviceNumber,
           unit: savedRequest.unit,
           phone: savedRequest.phone,
         },
+        ...savedRequest.companions.map((c) => ({
+          gender: c.gender,
+          rankCode: c.rankCode,
+          relation: c.relation,
+          name: c.name.trim() || undefined,
+          phone: c.phone.trim() || null,
+        })),
       ],
     });
 
@@ -380,6 +482,15 @@ export default function NewBookingWizardScreen() {
                   {savedRequest.rankCode} {savedRequest.guestName}
                 </Text>
               </View>
+
+              {savedRequest.companions.length > 0 ? (
+                <View style={styles.detailRow}>
+                  <Text style={[styles.detailLabel, { color: colors.muted }]}>Party</Text>
+                  <Text style={[styles.detailValue, { color: colors.text }]}>
+                    {savedRequest.companions.length + 1} people
+                  </Text>
+                </View>
+              ) : null}
 
               <View style={styles.detailRow}>
                 <Text style={[styles.detailLabel, { color: colors.muted }]}>Request ID</Text>
@@ -639,6 +750,95 @@ export default function NewBookingWizardScreen() {
           </View>
         </Card>
 
+        {/* Section 3: Party (family / other service members) */}
+        <Card style={[styles.card, { marginTop: spacing.md }]}>
+          <View style={styles.cardHeaderRow}>
+            <Text style={[styles.sectionTitle, { color: colors.navy }]}>
+              3. TRAVELLING WITH ({companions.length})
+            </Text>
+            <Badge label="Optional" variant="neutral" />
+          </View>
+          <Text style={[styles.sectionSubtitle, { color: colors.muted }]}>
+            Add family members and other civilians, or further service members. Civilians need no
+            rank and may share a room with anyone in this booking, but never with another booking's
+            guests. Ranked guests share only with the same gender and rank. Every person takes one bed.
+          </Text>
+
+          {companions.map((c, idx) => {
+            const civilian = !c.rankCode;
+            return (
+              <View key={idx} style={[styles.companionRow, { borderColor: colors.border }]}>
+                <View style={styles.cardHeaderRow}>
+                  <Text style={[styles.companionTitle, { color: colors.navy }]}>
+                    Person {idx + 2}
+                  </Text>
+                  <Button
+                    label="Remove"
+                    variant="secondary"
+                    accessibilityLabel={`Remove person ${idx + 2}`}
+                    onPress={() => handleRemoveCompanion(idx)}
+                  />
+                </View>
+                <Select
+                  label="Relation"
+                  value={c.relation}
+                  onChange={(val: string) => handleChangeRelation(idx, val as GuestRelation)}
+                  options={COMPANION_RELATION_OPTIONS}
+                />
+                <View style={{ marginTop: spacing.sm }}>
+                  <Select
+                    label="Gender"
+                    value={c.gender}
+                    onChange={(val: string) => handleUpdateCompanion(idx, { gender: val as Gender })}
+                    options={GENDER_OPTIONS}
+                  />
+                </View>
+                {!civilian && (
+                  <View style={{ marginTop: spacing.sm }}>
+                    <Select
+                      label="Rank"
+                      value={c.rankCode ?? currentRank}
+                      onChange={(val: string) => handleUpdateCompanion(idx, { rankCode: val as RankCode })}
+                      options={RANK_OPTIONS}
+                    />
+                  </View>
+                )}
+                <View style={{ marginTop: spacing.sm }}>
+                  <Field
+                    label={civilian ? 'Full Name' : 'Full Name (Optional)'}
+                    placeholder="Name as on ID"
+                    value={c.name}
+                    onChangeText={(text) => handleUpdateCompanion(idx, { name: text })}
+                    hint={civilian ? 'Can be completed later from Guest Details' : undefined}
+                  />
+                </View>
+                <View style={{ marginTop: spacing.sm }}>
+                  <Field
+                    label="Contact Number (Optional)"
+                    placeholder="e.g. 9876543210"
+                    value={c.phone}
+                    onChangeText={(text) => handleUpdateCompanion(idx, { phone: text })}
+                    keyboardType="phone-pad"
+                  />
+                </View>
+              </View>
+            );
+          })}
+
+          {unnamedCivilians > 0 && (
+            <Banner
+              type="warning"
+              message={`${unnamedCivilians} civilian guest${unnamedCivilians > 1 ? 's have' : ' has'} no name yet. You can add it later from Guest Details.`}
+              style={{ marginTop: spacing.sm }}
+            />
+          )}
+
+          <View style={styles.addRow}>
+            <Button label="+ Add Family / Civilian" variant="secondary" onPress={handleAddCivilian} />
+            <Button label="+ Add Service Member" variant="secondary" onPress={handleAddServiceMember} />
+          </View>
+        </Card>
+
         {/* Action Buttons */}
         <View style={styles.actionContainer}>
           <Button
@@ -688,6 +888,21 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: spacing.sm,
     marginTop: spacing.sm,
+  },
+  companionRow: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  companionTitle: {
+    fontSize: typography.sm,
+    fontWeight: typography.weights.bold,
+  },
+  addRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
   },
   actionContainer: {
     marginTop: spacing.lg,

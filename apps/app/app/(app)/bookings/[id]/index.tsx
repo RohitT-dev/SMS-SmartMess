@@ -26,6 +26,7 @@ import {
   getActiveKeyVersion,
 } from '../../../../src/features/crypto-session/cryptoSession';
 import { humanizeStatus } from '../../../../src/lib/labels';
+import { describeGuest } from '../../../../src/features/bookings/party';
 import { fetchRoomDayStates } from '../../../../src/features/bookings/roomState';
 import { useRoomNames } from '../../../../src/features/rooms/useRoomNames';
 import {
@@ -33,6 +34,7 @@ import {
   type Category,
   type Gender,
   type RankCode,
+  type GuestRelation,
   type GuestDemand,
 } from '@sms/core';
 
@@ -77,6 +79,12 @@ export default function BookingDetailRecordScreen() {
     },
   });
 
+  const guestsBySeq = [...(booking?.booking_guests ?? [])].sort((x: any, y: any) => x.seq - y.seq);
+  const guestNo = (guestId: string) => {
+    const i = guestsBySeq.findIndex((g: any) => g.id === guestId);
+    return i === -1 ? null : i + 1;
+  };
+
   const activeAllocs = (booking?.allocations || []).filter((a: any) => a.status === 'ACTIVE');
   const isPendingAllotment =
     booking?.status === 'PENDING_ALLOTMENT' ||
@@ -93,7 +101,11 @@ export default function BookingDetailRecordScreen() {
     if (!booking?.booking_guests) return [];
     return [...booking.booking_guests]
       .sort((a, b) => a.seq - b.seq)
-      .map((g: any) => ({ gender: g.gender as Gender, rankCode: g.rank_code as RankCode }));
+      .map((g: any) => ({
+        gender: g.gender as Gender,
+        rankCode: (g.rank_code ?? null) as RankCode | null,
+        relation: g.relation as GuestRelation,
+      }));
   }, [booking?.booking_guests]);
 
   const allotmentPlan = useMemo(() => {
@@ -164,7 +176,8 @@ export default function BookingDetailRecordScreen() {
       preferredRoomType: booking.preferred_room_type || undefined,
       guests: sortedGuests.map((g: any) => ({
         gender: g.gender as Gender,
-        rankCode: g.rank_code as RankCode,
+        rankCode: (g.rank_code ?? null) as RankCode | null,
+        relation: g.relation as GuestRelation,
         name: g.guest_name || undefined,
         serviceNumber: g.service_number || undefined,
         unit: g.unit || undefined,
@@ -203,7 +216,9 @@ export default function BookingDetailRecordScreen() {
     });
     if (!cipher) return 'Details Pending';
     const pii = decryptGuestPii(guestId, cipher);
-    return `${pii.name} (Service No: ${pii.serviceNumber || 'N/A'}, Phone: ${pii.phone}, Unit: ${pii.unit || 'N/A'})`;
+    const guest = booking?.booking_guests?.find((g: any) => g.id === guestId);
+    if (guest && !guest.rank_code) return `${pii.name} (Phone: ${pii.phone || 'N/A'})`;
+    return `${pii.name} (Service No: ${pii.serviceNumber || 'N/A'}, Phone: ${pii.phone || 'N/A'}, Unit: ${pii.unit || 'N/A'})`;
   };
 
   const handleCancelBooking = async () => {
@@ -450,12 +465,12 @@ export default function BookingDetailRecordScreen() {
             />
           </View>
 
-          {booking?.booking_guests?.map((guest: any, idx: number) => (
+          {guestsBySeq.map((guest: any, idx: number) => (
             <View key={guest.id} style={[styles.guestItem, { borderColor: colors.border }]}>
               <View style={styles.guestItemHeader}>
                 <View>
                   <Text style={[styles.guestName, { color: colors.navy }]}>
-                    Guest #{idx + 1}: Rank {guest.rank_code} • Gender {guest.gender}
+                    #{idx + 1}: {describeGuest(guest)}
                   </Text>
                   {guest.guest_code ? (
                     <Text style={{ fontSize: typography.xs, color: colors.blue, fontWeight: 'bold', marginTop: 2 }}>
@@ -495,6 +510,7 @@ export default function BookingDetailRecordScreen() {
                   {decryptRoomName(a.room_id, a.rooms?.name_enc)}
                 </Text>{' '}
                 • Bed Slot: <Text style={{ fontWeight: 'bold' }}>{a.bed_slot}</Text>
+                {guestNo(a.guest_id) ? ` • Person #${guestNo(a.guest_id)}` : ''}
               </Text>
               <Badge label={humanizeStatus(a.status)} variant={a.status === 'ACTIVE' ? 'success' : 'default'} />
             </View>

@@ -7,7 +7,7 @@ import type {
   PlannedAssignment,
   RoomDayState
 } from './types.ts';
-import type { Gender, RankCode, RoomType, VisitorCategory } from './constants.ts';
+import type { Gender, GuestRelation, RankCode, RoomType, VisitorCategory } from './constants.ts';
 import { CATEGORIES } from './constants.ts';
 
 export type RoomAvailabilityStatus = 'free' | 'one_bed_free' | 'full' | 'out_of_service';
@@ -56,6 +56,81 @@ export function getDatesBetween(checkIn: string, checkOut: string): string[] {
   return dates;
 }
 
+export interface SharingPerson {
+  gender: Gender;
+  /** Null for civilians. */
+  rankCode: RankCode | null;
+  /** The booking the person belongs to; unknown (undefined) for a booking not yet created. */
+  bookingId?: string;
+}
+
+/**
+ * Room sharing rule (mirrors trigger_enforce_sharing_rule):
+ * - two ranked people share only with the same gender and rank, across any bookings;
+ * - a civilian shares only with members of their own booking (any gender or rank).
+ */
+export function canShareRoom(a: SharingPerson, b: SharingPerson): boolean {
+  if (a.rankCode && b.rankCode) return a.gender === b.gender && a.rankCode === b.rankCode;
+  return a.bookingId !== undefined && a.bookingId === b.bookingId;
+}
+
+/** A guest's relation, filling in the default for callers that leave it out. */
+export function guestRelation(g: GuestDemand, index: number): GuestRelation {
+  if (g.relation) return g.relation;
+  if (!g.rankCode) return 'OTHER';
+  return index === 0 ? 'PRIMARY' : 'SERVICE';
+}
+
+type IndexedGuest = GuestDemand & { guestIndex: number };
+
+/**
+ * Groups a party into room pairs and singles:
+ * 1. the primary with their spouse;
+ * 2. ranked guests of the same gender and rank;
+ * 3. each remaining ranked guest with a civilian of the party;
+ * 4. remaining civilians with each other.
+ */
+export function pairParty(guests: GuestDemand[]): {
+  pairs: Array<[IndexedGuest, IndexedGuest]>;
+  singles: IndexedGuest[];
+} {
+  const all = guests.map((g, idx) => ({ ...g, guestIndex: idx }));
+  let ranked = all.filter((g) => g.rankCode);
+  const civilians = all.filter((g) => !g.rankCode);
+  const pairs: Array<[IndexedGuest, IndexedGuest]> = [];
+  const singles: IndexedGuest[] = [];
+
+  const primary = ranked.find((g) => guestRelation(g, g.guestIndex) === 'PRIMARY');
+  const spouseIdx = civilians.findIndex((c) => c.relation === 'SPOUSE');
+  if (primary && spouseIdx !== -1) {
+    pairs.push([primary, civilians.splice(spouseIdx, 1)[0]]);
+    ranked = ranked.filter((g) => g !== primary);
+  }
+
+  const grouped = new Map<string, IndexedGuest[]>();
+  for (const g of ranked) {
+    const key = `${g.gender}-${g.rankCode}`;
+    if (!grouped.has(key)) grouped.set(key, []);
+    grouped.get(key)!.push(g);
+  }
+  const rankedSingles: IndexedGuest[] = [];
+  for (const list of grouped.values()) {
+    while (list.length >= 2) pairs.push([list.shift()!, list.shift()!]);
+    if (list.length === 1) rankedSingles.push(list.shift()!);
+  }
+  rankedSingles.sort((a, b) => a.guestIndex - b.guestIndex);
+
+  for (const s of rankedSingles) {
+    const companion = civilians.shift();
+    if (companion) pairs.push([s, companion]);
+    else singles.push(s);
+  }
+  while (civilians.length >= 2) pairs.push([civilians.shift()!, civilians.shift()!]);
+  if (civilians.length === 1) singles.push(civilians.shift()!);
+
+  return { pairs, singles };
+}
+
 interface RoomIntervalSummary {
   roomId: string;
   roomType: RoomType;
@@ -65,8 +140,8 @@ interface RoomIntervalSummary {
   bed1Free: boolean;
   bed2Free: boolean;
   // Occupant in the other bed if exactly one bed is taken throughout the interval
-  bed1Occupant?: { gender: Gender; rankCode: RankCode };
-  bed2Occupant?: { gender: Gender; rankCode: RankCode };
+  bed1Occupant?: SharingPerson;
+  bed2Occupant?: SharingPerson;
 }
 
 function summarizeRoomsForInterval(
@@ -107,11 +182,11 @@ function summarizeRoomsForInterval(
     for (const occ of s.occupants) {
       if (occ.bedSlot === 1) {
         summary.bed1Free = false;
-        summary.bed1Occupant = { gender: occ.gender, rankCode: occ.rankCode };
+        summary.bed1Occupant = { gender: occ.gender, rankCode: occ.rankCode, bookingId: occ.bookingId };
       }
       if (occ.bedSlot === 2) {
         summary.bed2Free = false;
-        summary.bed2Occupant = { gender: occ.gender, rankCode: occ.rankCode };
+        summary.bed2Occupant = { gender: occ.gender, rankCode: occ.rankCode, bookingId: occ.bookingId };
       }
     }
   }
@@ -124,7 +199,8 @@ function summarizeRoomsForInterval(
  *
  * Implements:
  * 1. Respect preferredRoomType first; if it cannot fit, mark usedFallbackType and try other non-suite types.
- * 2. Pair guests of the same booking who share gender and rank into one room.
+ * 2. Pair guests of the same booking into one room (see pairParty: primary + spouse, same gender
+ *    and rank, ranked guest + civilian, civilians together).
  * 3. Use whole free rooms for the rest.
  * 4. Use compatible partial rooms (shareable beds) only when whole rooms run out.
  * 5. Never return a Suite (Suites are managed via a dedicated Admin screen).
@@ -136,28 +212,8 @@ export function planAllotment(request: BookingPlanRequest, states: RoomDayState[
     throw new Error('Check-out must be after check-in');
   }
 
-  // 1. Group guests into pairs (same gender, same rank) and singles
-  const unassigned = request.guests.map((g, idx) => ({ ...g, guestIndex: idx }));
-  const pairs: Array<[typeof unassigned[0], typeof unassigned[0]]> = [];
-  const singles: typeof unassigned = [];
-
-  const grouped = new Map<string, typeof unassigned>();
-  for (const g of unassigned) {
-    const key = `${g.gender}-${g.rankCode}`;
-    if (!grouped.has(key)) grouped.set(key, []);
-    grouped.get(key)!.push(g);
-  }
-
-  for (const list of grouped.values()) {
-    while (list.length >= 2) {
-      const g1 = list.shift()!;
-      const g2 = list.shift()!;
-      pairs.push([g1, g2]);
-    }
-    if (list.length === 1) {
-      singles.push(list.shift()!);
-    }
-  }
+  // 1. Group the party into room pairs and singles
+  const { pairs, singles } = pairParty(request.guests);
 
   const roomSummaries = Array.from(summarizeRoomsForInterval(states, stayDates).values())
     // Suites are NEVER offered by the standard allotment engine
@@ -227,8 +283,8 @@ export function planAllotment(request: BookingPlanRequest, states: RoomDayState[
 }
 
 function tryAssignRooms(
-  pairs: Array<[GuestDemand & { guestIndex: number }, GuestDemand & { guestIndex: number }]>,
-  singles: Array<GuestDemand & { guestIndex: number }>,
+  pairs: Array<[IndexedGuest, IndexedGuest]>,
+  singles: IndexedGuest[],
   availableRooms: RoomIntervalSummary[],
   preferSharing = false
 ): PlannedAssignment[] | null {
@@ -255,24 +311,20 @@ function tryAssignRooms(
   // when whole rooms run out. With preferSharing the order flips: shared beds first.
   const findShared = (s: GuestDemand) =>
     roomPool.findIndex((r) => {
-      if (r.bed1Free && !r.bed2Free && r.bed2Occupant) {
-        return r.bed2Occupant.gender === s.gender && r.bed2Occupant.rankCode === s.rankCode;
-      }
-      if (r.bed2Free && !r.bed1Free && r.bed1Occupant) {
-        return r.bed1Occupant.gender === s.gender && r.bed1Occupant.rankCode === s.rankCode;
-      }
+      if (r.bed1Free && !r.bed2Free && r.bed2Occupant) return canShareRoom(r.bed2Occupant, s);
+      if (r.bed2Free && !r.bed1Free && r.bed1Occupant) return canShareRoom(r.bed1Occupant, s);
       return false;
     });
   const findWhole = () => roomPool.findIndex((r) => r.bed1Free && r.bed2Free);
 
-  const seatShared = (s: GuestDemand & { guestIndex: number }, idx: number) => {
+  const seatShared = (s: IndexedGuest, idx: number) => {
     const r = roomPool[idx];
     const bedSlot: 1 | 2 = r.bed1Free ? 1 : 2;
     if (bedSlot === 1) r.bed1Free = false;
     else r.bed2Free = false;
     assignments.push({ guestIndex: s.guestIndex, roomId: r.roomId, roomType: r.roomType, bedSlot });
   };
-  const seatWhole = (s: GuestDemand & { guestIndex: number }, idx: number) => {
+  const seatWhole = (s: IndexedGuest, idx: number) => {
     const r = roomPool[idx];
     r.bed1Free = false;
     // Record the lone occupant so bed 2 stays open to a compatible guest.
@@ -334,20 +386,7 @@ export function findAlternateWindows(
       (r) => r.roomType !== 'SUITE' && !r.isClosed
     );
 
-    // Group guests and test if fits
-    const unassigned = request.guests.map((g, idx) => ({ ...g, guestIndex: idx }));
-    const pairs: Array<[typeof unassigned[0], typeof unassigned[0]]> = [];
-    const singles: typeof unassigned = [];
-    const grouped = new Map<string, typeof unassigned>();
-    for (const g of unassigned) {
-      const key = `${g.gender}-${g.rankCode}`;
-      if (!grouped.has(key)) grouped.set(key, []);
-      grouped.get(key)!.push(g);
-    }
-    for (const list of grouped.values()) {
-      while (list.length >= 2) pairs.push([list.shift()!, list.shift()!]);
-      if (list.length === 1) singles.push(list.shift()!);
-    }
+    const { pairs, singles } = pairParty(request.guests);
 
     const result = tryAssignRooms(pairs, singles, altSummaries, request.preferSharing);
     if (result) {

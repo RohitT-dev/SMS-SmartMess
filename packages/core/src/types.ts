@@ -4,6 +4,7 @@ import type {
   BookingStatus,
   DetailsStatus,
   Gender,
+  GuestRelation,
   Permission,
   RankCode,
   RoomType,
@@ -60,7 +61,9 @@ export interface BookingGuest {
   bookingId: string;
   seq: number;
   gender: Gender;
-  rankCode: RankCode;
+  /** Null for civilians. */
+  rankCode: RankCode | null;
+  relation: GuestRelation;
   details: DetailsStatus;
   createdBy: string;
 }
@@ -68,9 +71,10 @@ export interface BookingGuest {
 export interface GuestPii {
   name: string;
   serviceNumber?: string | null;
+  /** Required for ranked guests (GuestPiiSchema); optional for civilians (CivilianPiiSchema). */
   idNumber?: string | null;
   idType?: string | null;
-  phone: string;
+  phone?: string | null;
   unit?: string | null;
   notes?: string | null;
 }
@@ -127,7 +131,9 @@ export interface RoomDayOccupant {
   bookingId: string;
   bedSlot: 1 | 2;
   gender: Gender;
-  rankCode: RankCode;
+  /** Null for civilians. */
+  rankCode: RankCode | null;
+  relation?: GuestRelation;
   category: VisitorCategory;
   bookingStatus: BookingStatus;
   checkIn: string;
@@ -146,7 +152,10 @@ export interface RoomDayState {
 
 export interface GuestDemand {
   gender: Gender;
-  rankCode: RankCode;
+  /** Required for PRIMARY/SERVICE; null for civilians. */
+  rankCode: RankCode | null;
+  /** Defaults to PRIMARY for the first guest and SERVICE for later ranked guests. */
+  relation?: GuestRelation;
 }
 
 export interface BookingPlanRequest {
@@ -158,7 +167,8 @@ export interface BookingPlanRequest {
   isSuiteBooking?: boolean;
   /**
    * Offer beds in already-shared rooms first: a lone guest is seated beside a compatible
-   * occupant (same gender and rank) before any empty room is opened. Applies across room
+   * occupant (same gender and rank; civilians never share across bookings) before any empty
+   * room is opened. Applies across room
    * types; the preferred type then only orders the remaining choices.
    */
   preferSharing?: boolean;
@@ -202,7 +212,7 @@ export interface EvictionCandidate {
   bedSlot: 1 | 2;
   category: VisitorCategory;
   occupantGender: Gender;
-  occupantRank: RankCode;
+  occupantRank: RankCode | null;
   daysStayed: number;
   daysRemaining: number;
   fitsIncoming: boolean;

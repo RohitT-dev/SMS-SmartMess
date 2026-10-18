@@ -1,3 +1,4 @@
+import { guestRelation, type GuestDemand } from '@sms/core';
 import { addDaysToDateString } from '../../lib/dates';
 
 /** findAlternateWindows() scans this many days ahead of the requested check-in. */
@@ -11,4 +12,27 @@ export const ALTERNATE_HORIZON_DAYS = 90;
  */
 export function alternatesHorizonEnd(checkOut: string): string {
   return addDaysToDateString(checkOut, ALTERNATE_HORIZON_DAYS);
+}
+
+/** p_guests rows for create_booking / approve_eviction: seq, gender, rank (null for civilians), relation, plus any contact details. */
+export function guestRowsPayload(
+  guests: Array<
+    GuestDemand & {
+      name?: string | null;
+      serviceNumber?: string | null;
+      unit?: string | null;
+      phone?: string | null;
+    }
+  >,
+) {
+  return guests.map((g, idx) => ({
+    seq: idx + 1,
+    gender: g.gender,
+    rank_code: g.rankCode,
+    relation: guestRelation(g, idx),
+    guest_name: g.name || null,
+    service_number: g.serviceNumber || null,
+    unit: g.unit || null,
+    phone: g.phone || null,
+  }));
 }

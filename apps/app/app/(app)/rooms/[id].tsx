@@ -15,6 +15,7 @@ import { Dialog } from '../../../src/ui/primitives/Dialog';
 import { Banner } from '../../../src/ui/primitives/Banner';
 import { spacing, typography } from '../../../src/ui/tokens';
 import { supabase } from '../../../src/lib/supabase';
+import { describeGuest } from '../../../src/features/bookings/party';
 import { logAction } from '../../../src/lib/activityLog';
 import { userErrorMessage } from '../../../src/lib/userError';
 import {
@@ -27,7 +28,7 @@ interface Occupant {
   guest_id: string;
   bed_slot: 1 | 2;
   bookings?: { id: string; category: string; check_in: string; check_out: string; status: string };
-  booking_guests?: { rank_code: string; gender: string };
+  booking_guests?: { rank_code: string | null; gender: string; relation?: string };
 }
 
 interface RoomDetail {
@@ -122,7 +123,7 @@ export default function RoomDetailScreen() {
     if (error) throw error;
     if (!cipher) return 'Details Pending';
     const pii = decryptGuestPii(guestId, cipher);
-    return `${pii.name} (Service: ${pii.serviceNumber || 'N/A'}, Phone: ${pii.phone})`;
+    return `${pii.name} (Service: ${pii.serviceNumber || 'N/A'}, Phone: ${pii.phone || 'N/A'})`;
   };
 
   const canDeleteRoom = canManageRooms && (room?.room_type !== 'SUITE' || userRole === 'admin');
@@ -200,8 +201,10 @@ export default function RoomDetailScreen() {
           <View style={styles.occupantInfo}>
             <Text style={[styles.infoRow, { color: colors.text }]}>
               Category: <Text style={{ fontWeight: 'bold' }}>{alloc.bookings?.category}</Text> •
-              Rank: <Text style={{ fontWeight: 'bold' }}>{alloc.booking_guests?.rank_code}</Text> •
-              Gender: <Text style={{ fontWeight: 'bold' }}>{alloc.booking_guests?.gender}</Text>
+              Guest:{' '}
+              <Text style={{ fontWeight: 'bold' }}>
+                {alloc.booking_guests ? describeGuest(alloc.booking_guests) : '—'}
+              </Text>
             </Text>
             <Text style={[styles.infoRow, { color: colors.muted }]}>
               Stay: {alloc.bookings?.check_in} (12 PM) to {alloc.bookings?.check_out} (12 PM)
@@ -242,7 +245,7 @@ export default function RoomDetailScreen() {
             <Text style={[styles.freeNotice, { color: closedToday ? colors.muted : colors.green }]}>
               {closedToday
                 ? 'Out of service today'
-                : 'Available. 12:00 PM Check-In / 12:00 PM Check-Out standard mess rule applies.'}
+                : 'Available. 12:00 PM Check-In / 12:00 PM Check-Out standard mess rule applies. A ranked guest must match the other occupant’s gender and rank; civilians share only with their own booking.'}
             </Text>
             {!closedToday && (
               <Button
@@ -290,7 +293,7 @@ export default function RoomDetailScreen() {
           upcoming.map((a) => (
             <Text key={a.id} style={[styles.infoRow, { color: colors.text }]}>
               {a.bookings?.check_in} (12 PM) → {a.bookings?.check_out} (12 PM) • Bed {a.bed_slot} •{' '}
-              {a.bookings?.category} • {a.booking_guests?.gender}/{a.booking_guests?.rank_code}
+              {a.bookings?.category} • {a.booking_guests ? describeGuest(a.booking_guests) : '—'}
             </Text>
           ))
         )}

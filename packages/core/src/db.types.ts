@@ -4,6 +4,7 @@ import type {
   BookingStatus,
   DetailsStatus,
   Gender,
+  GuestRelation,
   RankCode,
   RoomType,
   VisitorCategory
@@ -127,7 +128,8 @@ export interface Database {
           booking_id: string;
           seq: number;
           gender: Gender;
-          rank_code: RankCode;
+          rank_code: RankCode | null;
+          relation: GuestRelation;
           details: DetailsStatus;
           created_by: string;
         };

@@ -262,12 +262,14 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       if (db.room_closures.some((c) => c.room_id === row.room_id && overlaps(parseRange(c.period), stay))) {
         throw new PgError('ERR_ROOM_CLOSED');
       }
-      // trg_allocations_sharing_rule
+      // trg_allocations_sharing_rule: ranked people need the same gender and rank; a civilian
+      // shares only with their own booking.
       const g = guestById(row.guest_id)!;
       const mismatch = db.allocations.some((a) => {
         if (a.room_id !== row.room_id || a.status !== 'ACTIVE' || !overlaps(parseRange(a.stay), stay)) return false;
         const og = guestById(a.guest_id)!;
-        return og.gender !== g.gender || og.rank_code !== g.rank_code;
+        if (og.rank_code && g.rank_code) return og.gender !== g.gender || og.rank_code !== g.rank_code;
+        return a.booking_id !== row.booking_id;
       });
       if (mismatch) throw new PgError('ERR_SHARE_RULE');
     }
@@ -320,6 +322,17 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     if (partySize < 1 || partySize > 40) {
       throw new PgError('new row for relation "bookings" violates check constraint "bookings_party_size_check"', '23514');
     }
+    const minSeq = Math.min(...pGuests.map((g) => Number(g.seq)));
+    const relationOf = (g: Row) =>
+      g.relation ?? (Number(g.seq) === minSeq ? 'PRIMARY' : g.rank_code ? 'SERVICE' : 'OTHER');
+    if (pGuests.filter((g) => relationOf(g) === 'PRIMARY').length !== 1) {
+      throw new PgError('ERR_PRIMARY_GUEST: a booking needs exactly one primary ranked person');
+    }
+    for (const g of pGuests) {
+      if (['PRIMARY', 'SERVICE'].includes(relationOf(g)) !== Boolean(g.rank_code)) {
+        throw new PgError('new row for relation "booking_guests" violates check constraint "check_guest_rank_matches_relation"', '23514');
+      }
+    }
 
     const isPending =
       pBooking.status === 'PENDING_ALLOTMENT' || !pAllocs || pAllocs.length === 0;
@@ -362,7 +375,8 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
         booking_id: bookingId,
         seq: Number(g.seq),
         gender: g.gender,
-        rank_code: g.rank_code,
+        rank_code: g.rank_code ?? null,
+        relation: relationOf(g),
         details: 'PENDING',
         created_by: uid(),
         created_at: nowIso(),
@@ -622,7 +636,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       audit('blind_index_search', 'guest_pii', null, {});
       const ids = new Set<string>();
       db.guest_pii.forEach((p) => {
-        if (p.id_blind_index === a.p_blind) {
+        if (p.id_blind_index != null && p.id_blind_index === a.p_blind) {
           const g = guestById(p.guest_id);
           if (g) ids.add(g.booking_id);
         }
@@ -741,6 +755,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
                 bedSlot: al.bed_slot,
                 gender: g?.gender,
                 rankCode: g?.rank_code,
+                relation: g?.relation,
                 guestCode: g?.guest_code ?? 'GST-0000',
                 category: b?.category,
                 bookingStatus: b?.status,

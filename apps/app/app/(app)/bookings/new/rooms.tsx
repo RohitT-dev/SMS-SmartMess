@@ -17,7 +17,12 @@ import { userErrorMessage } from '../../../../src/lib/userError';
 import { fetchRoomDayStates } from '../../../../src/features/bookings/roomState';
 import { decryptRoomName } from '../../../../src/features/crypto-session/cryptoSession';
 import { persistGuestDetails } from '../../../../src/features/bookings/guestDetails';
-import type { Category, GuestDemand, RoomDayState } from '@sms/core';
+import { canShareRoom, type Category, type GuestDemand, type RoomDayState, type SharingPerson } from '@sms/core';
+import { guestRowsPayload } from '../../../../src/features/bookings/planBooking';
+import { describeGuest } from '../../../../src/features/bookings/party';
+
+/** Stand-in booking id for a party that has no booking yet. */
+const NEW_BOOKING = 'new';
 
 export interface RoomGuest extends GuestDemand {
   name?: string;
@@ -58,7 +63,7 @@ function parsePayload(payload: string | undefined): ParsedPayload | null {
 interface RoomOccupancy {
   closed: boolean;
   takenBeds: Set<number>;
-  occupants: Array<{ gender: string; rankCode: string }>;
+  occupants: SharingPerson[];
 }
 
 function summarizeOccupancy(states: RoomDayState[] | undefined): Record<string, RoomOccupancy> {
@@ -74,8 +79,8 @@ function summarizeOccupancy(states: RoomDayState[] | undefined): Record<string, 
       if (occ.bedSlot != null) {
         o.takenBeds.add(Number(occ.bedSlot));
       }
-      if (!o.occupants.some((x) => x.gender === occ.gender && x.rankCode === occ.rankCode)) {
-        o.occupants.push({ gender: occ.gender, rankCode: occ.rankCode });
+      if (!o.occupants.some((x) => x.bookingId === occ.bookingId && x.gender === occ.gender && x.rankCode === occ.rankCode)) {
+        o.occupants.push({ gender: occ.gender, rankCode: occ.rankCode, bookingId: occ.bookingId });
       }
     }
   }
@@ -93,6 +98,16 @@ export default function RoomAllotmentScreen() {
   const checkIn = parsed?.checkIn ?? '';
   const checkOut = parsed?.checkOut ?? '';
   const guests = useMemo(() => parsed?.guests ?? [], [parsed]);
+  const bookingKey = parsed?.bookingId ?? NEW_BOOKING;
+  const personOf = useCallback(
+    (idx: number): SharingPerson => ({
+      gender: guests[idx].gender,
+      rankCode: guests[idx].rankCode,
+      bookingId: bookingKey,
+    }),
+    [guests, bookingKey],
+  );
+  const guestWithDetails = (idx: number): RoomGuest => guests[idx] ?? guests[0];
 
   const [roomTypeFilter, setRoomTypeFilter] = useState<string>(() => {
     return parsed?.preferredRoomType || 'ALL';
@@ -175,18 +190,13 @@ export default function RoomAllotmentScreen() {
           // STRICT: Rooms with 0 free beds are completely excluded from the dropdown!
           if (freeBeds.length === 0) return false;
 
-          // Check sharing rules with DB occupants: same gender and same rank required
-          if (occ && occ.occupants.length > 0) {
-            const hasConflict = occ.occupants.some(
-              (o) => o.gender !== guest.gender || o.rankCode !== guest.rankCode
-            );
-            if (hasConflict) return false;
-          }
+          // Sharing rule with guests already staying there (see canShareRoom)
+          if (occ && occ.occupants.some((o) => !canShareRoom(personOf(guestIdx), o))) return false;
 
-          // Check sharing rules with session guests
-          const sessionConflict = guests.some((otherG, j) => {
+          // Sharing rule with the rest of this party placed in the same room
+          const sessionConflict = guests.some((_, j) => {
             if (j !== guestIdx && assignments[j]?.roomId === r.id) {
-              return otherG.gender !== guest.gender || otherG.rankCode !== guest.rankCode;
+              return !canShareRoom(personOf(guestIdx), personOf(j));
             }
             return false;
           });
@@ -211,7 +221,7 @@ export default function RoomAllotmentScreen() {
           };
         });
     },
-    [filteredRooms, guests, assignments, occupancy, states]
+    [filteredRooms, guests, assignments, occupancy, states, personOf]
   );
 
   // Auto-select target room or first available room when states load
@@ -285,18 +295,18 @@ export default function RoomAllotmentScreen() {
         }
       });
 
-      const profiles = [
-        ...list.map((l) => ({ gender: guests[l.idx].gender, rankCode: guests[l.idx].rankCode })),
-        ...(occ?.occupants ?? []),
-      ];
-      if (profiles.some((p) => p.gender !== profiles[0].gender || p.rankCode !== profiles[0].rankCode)) {
+      const party = list.map((l) => personOf(l.idx));
+      if (party.some((p, i) => party.slice(i + 1).some((q) => !canShareRoom(p, q)))) {
+        errors.push(`${name}: ranked guests sharing a room must have the same gender and rank.`);
+      }
+      if ((occ?.occupants ?? []).some((o) => party.some((p) => !canShareRoom(p, o)))) {
         errors.push(
-          `${name}: guests sharing a room must have the same gender and rank.`,
+          `${name}: cannot share with the guest already staying there (ranked guests need the same gender and rank; civilians share only within their own booking).`,
         );
       }
     }
     return Array.from(new Set(errors));
-  }, [assignments, guests, occupancy, roomName, states, statesLoading]);
+  }, [assignments, guests, occupancy, personOf, roomName, states, statesLoading]);
 
   const isValid =
     !statesLoading &&
@@ -351,15 +361,7 @@ export default function RoomAllotmentScreen() {
               is_suite_booking: false,
               preferred_room_type: roomTypeFilter === 'ALL' ? null : roomTypeFilter,
             },
-            p_guests: guests.map((g, idx) => ({
-              seq: idx + 1,
-              gender: g.gender,
-              rank_code: g.rankCode,
-              guest_name: g.name,
-              service_number: g.serviceNumber,
-              unit: g.unit,
-              phone: g.phone,
-            })),
+            p_guests: guestRowsPayload(guests),
             p_allocations: allocs,
           });
 
@@ -396,15 +398,7 @@ export default function RoomAllotmentScreen() {
             is_suite_booking: false,
             preferred_room_type: roomTypeFilter === 'ALL' ? null : roomTypeFilter,
           },
-          p_guests: guests.map((g, idx) => ({
-            seq: idx + 1,
-            gender: g.gender,
-            rank_code: g.rankCode,
-            guest_name: g.name,
-            service_number: g.serviceNumber,
-            unit: g.unit,
-            phone: g.phone,
-          })),
+          p_guests: guestRowsPayload(guests),
           p_allocations: allocs,
         });
 
@@ -429,8 +423,9 @@ export default function RoomAllotmentScreen() {
 
           if (gRows && gRows.length > 0) {
             for (let idx = 0; idx < gRows.length; idx++) {
-              const gInfo = guests[idx] || guests[0];
-              if (gInfo) {
+              const gInfo = guestWithDetails(idx);
+              // A civilian whose name was not entered yet is completed later from Guest Details.
+              if (gInfo && (gInfo.rankCode || gInfo.name?.trim())) {
                 await persistGuestDetails(gRows[idx].id, gInfo);
               }
             }
@@ -535,7 +530,7 @@ export default function RoomAllotmentScreen() {
             <Card key={idx} style={{ marginTop: spacing.md }}>
               <View style={styles.guestTitleRow}>
                 <Text style={[styles.guestTitle, { color: colors.navy }]}>
-                  {g.name ? `${g.name} (${g.rankCode})` : `Guest ${idx + 1}: ${g.rankCode}`} • {g.gender === 'M' ? 'Male' : 'Female'}
+                  {guestWithDetails(idx).name || `Guest ${idx + 1}`}: {describeGuest(g)}
                 </Text>
                 {assign.roomId && selectedRoom ? (
                   <Badge label={`Bed ${assign.bedSlot}`} variant="default" />

@@ -22,7 +22,18 @@ import {
   decryptRoomName,
   getActiveKeyVersion,
 } from '../../../../src/features/crypto-session/cryptoSession';
-import { rankCandidates, type Category, type GuestDemand, type EvictionCandidate } from '@sms/core';
+import {
+  canShareRoom,
+  rankCandidates,
+  type Category,
+  type GuestDemand,
+  type EvictionCandidate,
+  type SharingPerson,
+} from '@sms/core';
+import { guestRowsPayload } from '../../../../src/features/bookings/planBooking';
+
+/** Stand-in booking id for the incoming party, which has no id until it is created. */
+const INCOMING = 'incoming';
 
 interface ParsedPayload {
   category: Category;
@@ -67,11 +78,7 @@ export default function EvictionReviewScreen() {
         p_category: category,
         p_check_in: checkIn,
         p_check_out: checkOut,
-        p_guests: guests.map((g, idx) => ({
-          seq: idx + 1,
-          gender: g.gender,
-          rank_code: g.rankCode,
-        })),
+        p_guests: guestRowsPayload(guests),
       });
       if (error) throw error;
 
@@ -107,12 +114,18 @@ export default function EvictionReviewScreen() {
   });
 
   const remainingByRoom = useMemo(() => {
-    const out: Record<string, Array<{ allocationId: string; gender: string; rankCode: string }>> = {};
+    const out: Record<string, Array<SharingPerson & { allocationId: string; relation?: string }>> = {};
     for (const st of states ?? []) {
       for (const occ of st.occupants) {
         const list = (out[st.roomId] ??= []);
         if (!list.some((x) => x.allocationId === occ.allocationId)) {
-          list.push({ allocationId: occ.allocationId, gender: occ.gender, rankCode: occ.rankCode });
+          list.push({
+            allocationId: occ.allocationId,
+            gender: occ.gender,
+            rankCode: occ.rankCode,
+            relation: occ.relation,
+            bookingId: occ.bookingId,
+          });
         }
       }
     }
@@ -130,7 +143,7 @@ export default function EvictionReviewScreen() {
         `Select at least ${guests.length} bed${guests.length > 1 ? 's' : ''}: one for each incoming guest (${selected.length} selected).`,
       );
     }
-    const seatedByRoom: Record<string, Array<{ idx: number; gender: string; rankCode: string }>> = {};
+    const seatedByRoom: Record<string, Array<GuestDemand & { idx: number }>> = {};
     selected.slice(0, guests.length).forEach((cand, idx) => {
       (seatedByRoom[cand.roomId] ??= []).push({ idx, ...guests[idx] });
     });
@@ -139,12 +152,20 @@ export default function EvictionReviewScreen() {
       const stayers = (remainingByRoom[roomId] ?? []).filter(
         (r) => !selectedAllocationIds.includes(r.allocationId),
       );
-      const everyone = [...seated.map((x) => ({ gender: x.gender, rankCode: x.rankCode })), ...stayers];
-      if (everyone.some((p) => p.gender !== everyone[0].gender || p.rankCode !== everyone[0].rankCode)) {
+      const incoming: SharingPerson[] = seated.map((x) => ({
+        gender: x.gender,
+        rankCode: x.rankCode,
+        bookingId: INCOMING,
+      }));
+      const clashesWithStayer = stayers.some((st) => incoming.some((p) => !canShareRoom(p, st)));
+      const clashesWithinParty = incoming.some((p, i) => incoming.slice(i + 1).some((q) => !canShareRoom(p, q)));
+      if (clashesWithStayer) {
         problems.push(
-          stayers.length
-            ? `${roomLabel}: the guest remaining there has a different gender or rank than the incoming guest. Also select that occupant's bed, or choose another room.`
-            : `${roomLabel}: incoming guests ${seated.map((x) => x.idx + 1).join(' and ')} differ in gender or rank and cannot share this room.`,
+          `${roomLabel}: the guest remaining there cannot share with the incoming guest (different gender or rank, or a civilian from another booking). Also select that occupant's bed, or choose another room.`,
+        );
+      } else if (clashesWithinParty) {
+        problems.push(
+          `${roomLabel}: incoming guests ${seated.map((x) => x.idx + 1).join(' and ')} differ in gender or rank and cannot share this room.`,
         );
       }
     }
@@ -177,11 +198,7 @@ export default function EvictionReviewScreen() {
           check_in: checkIn,
           check_out: checkOut,
           party_size: guests.length,
-          guests: guests.map((g, idx) => ({
-            seq: idx + 1,
-            gender: g.gender,
-            rank_code: g.rankCode,
-          })),
+          guests: guestRowsPayload(guests),
         },
         p_evict_allocation_ids: selectedAllocationIds,
         p_reason_enc: reasonEnc,
@@ -277,13 +294,13 @@ export default function EvictionReviewScreen() {
                   </View>
 
                   <Text style={[styles.candMeta, { color: colors.text }]}>
-                    Occupant: <Text style={{ fontWeight: 'bold' }}>{cand.occupantGender}/{cand.occupantRank}</Text> •
+                    Occupant: <Text style={{ fontWeight: 'bold' }}>{cand.occupantGender}/{cand.occupantRank ?? 'Civilian'}</Text> •
                     Stayed: <Text style={{ fontWeight: 'bold' }}>{cand.daysStayed}d</Text> • Remaining:{' '}
                     <Text style={{ fontWeight: 'bold' }}>{cand.daysRemaining}d</Text>
                   </Text>
                   <Text style={[styles.candMeta, { color: colors.muted }]}>
                     {roommate
-                      ? `Other bed: ${roommate.gender}/${roommate.rankCode} stays unless also selected`
+                      ? `Other bed: ${roommate.gender}/${roommate.rankCode ?? 'Civilian'} stays unless also selected`
                       : 'Other bed in this room is empty'}
                   </Text>
                 </Pressable>

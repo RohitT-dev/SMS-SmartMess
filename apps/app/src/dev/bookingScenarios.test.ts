@@ -10,6 +10,7 @@ import {
   planAllotment,
   type AllotmentResult,
   type Category,
+  type CivilianRelation,
   type Gender,
   type GuestDemand,
   type RankCode,
@@ -19,7 +20,7 @@ import { createDevSupabase, DEV_USERS } from './devBackend';
 import { mapRoomDayState } from '../features/bookings/mapRoomState';
 import { userErrorMessage } from '../lib/userError';
 import { addDaysToDateString } from '../lib/dates';
-import { alternatesHorizonEnd } from '../features/bookings/planBooking';
+import { alternatesHorizonEnd, guestRowsPayload } from '../features/bookings/planBooking';
 import { buildPastBookingsHtml } from '../features/reports/pastBookingsHtml';
 
 type Sb = ReturnType<typeof createDevSupabase> & { auth: any };
@@ -28,6 +29,7 @@ const today = new Date().toISOString().slice(0, 10); // backend CURRENT_DATE is 
 const d = (n: number) => addDaysToDateString(today, n);
 
 const G = (gender: Gender, rankCode: RankCode): GuestDemand => ({ gender, rankCode });
+const C = (gender: Gender, relation: CivilianRelation): GuestDemand => ({ gender, rankCode: null, relation });
 
 interface BookArgs {
   category?: Category;
@@ -88,7 +90,7 @@ function bookingPayload(a: BookArgs, allocs: Array<{ guestIndex: number; roomId:
       party_size: a.guests.length,
       is_suite_booking: false,
     },
-    p_guests: a.guests.map((g, i) => ({ seq: i + 1, gender: g.gender, rank_code: g.rankCode })),
+    p_guests: guestRowsPayload(a.guests),
     p_allocations: allocs.map((x) => ({ guest_seq: x.guestIndex + 1, room_id: x.roomId, bed_slot: x.bedSlot })),
   };
 }
@@ -1835,5 +1837,63 @@ describe('roles and suites', () => {
   });
 });
 
+describe('civilian guests', () => {
+  it('officer + spouse share a room; children share the next one', async () => {
+    const r = await book({
+      checkIn: d(0),
+      checkOut: d(2),
+      guests: [G('M', 'WG_CDR'), C('F', 'SPOUSE'), C('M', 'CHILD'), C('F', 'CHILD')],
+      pref: 'VIP',
+    });
+    const roomOf = (i: number) => r.placements.find((p) => p.guest === i)!.room;
+    expect(roomOf(0)).toBe(roomOf(1));
+    expect(roomOf(2)).toBe(roomOf(3));
+    expect(roomOf(0)).not.toBe(roomOf(2));
+    const { data: guests } = await sb.from('booking_guests').select('*').eq('booking_id', r.id).order('seq');
+    expect(guests.map((g: any) => [g.relation, g.rank_code])).toEqual([
+      ['PRIMARY', 'WG_CDR'], ['SPOUSE', null], ['CHILD', null], ['CHILD', null],
+    ]);
+    const states = await rooms(d(0), d(1));
+    const occ = states.flatMap((s) => s.occupants).find((o: any) => o.relation === 'SPOUSE');
+    expect(occ).toMatchObject({ rankCode: null, bookingId: r.id });
+  });
 
+  it('a lone civilian is never seated beside another booking’s guest', async () => {
+    const first = await book({ checkIn: d(0), checkOut: d(1), guests: [G('F', 'FO'), C('F', 'OTHER'), C('F', 'OTHER')], pref: 'NORMAL' });
+    const lone = first.placements.find((p) => p.guest === 2)!;
+    const r = await book({ checkIn: d(0), checkOut: d(1), guests: [G('F', 'FO')], pref: 'NORMAL', sharing: true });
+    expect(r.placements[0].room).not.toBe(lone.room);
+    // Forcing it through the RPC hits the DB sharing rule.
+    const res = await sb.rpc('create_booking', bookingPayload(
+      { checkIn: d(0), checkOut: d(1), guests: [G('F', 'FO')] },
+      [{ guestIndex: 0, roomId: roomIds[lone.room], bedSlot: lone.bed === 1 ? 2 : 1 }],
+    ));
+    expect(res.error?.message).toContain('ERR_SHARE_RULE');
+  });
 
+  it('a booking must have exactly one ranked primary, and civilians carry no rank', async () => {
+    const civiliansOnly = await sb.rpc('create_booking', {
+      p_booking: { category: 'LEAVE', check_in: d(0), check_out: d(1), party_size: 1, is_suite_booking: false },
+      p_guests: [{ seq: 1, gender: 'F', rank_code: null, relation: 'SPOUSE' }],
+      p_allocations: [],
+    });
+    expect(civiliansOnly.error?.message).toContain('ERR_PRIMARY_GUEST');
+    const rankedCivilian = await sb.rpc('create_booking', {
+      p_booking: { category: 'LEAVE', check_in: d(0), check_out: d(1), party_size: 2, is_suite_booking: false },
+      p_guests: [
+        { seq: 1, gender: 'M', rank_code: 'FO', relation: 'PRIMARY' },
+        { seq: 2, gender: 'F', rank_code: 'FO', relation: 'SPOUSE' },
+      ],
+      p_allocations: [],
+    });
+    expect(rankedCivilian.error?.message).toContain('check_guest_rank_matches_relation');
+  });
+
+  it('civilian details save without an ID number', async () => {
+    const r = await book({ checkIn: d(0), checkOut: d(1), guests: [G('M', 'FO'), C('M', 'CHILD')] });
+    const { data: guests } = await sb.from('booking_guests').select('*').eq('booking_id', r.id).order('seq');
+    const res = await sb.rpc('set_guest_pii', { p_guest_id: guests[1].id, p_pii_enc: 'cipher', p_blind: null, p_key_version: 1 });
+    expect(res.error).toBeNull();
+    expect((await sb.rpc('search_guests_by_blind_index', { p_blind: null })).data).toEqual([]);
+  });
+});
