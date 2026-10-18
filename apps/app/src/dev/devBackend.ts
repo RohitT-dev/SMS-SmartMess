@@ -53,7 +53,8 @@ class PgError extends Error {
 }
 
 const nowIso = () => new Date().toISOString();
-const todayUtc = () => new Date().toISOString().slice(0, 10);
+/** "Today" in the mess's time zone (public.mess_today(); app_config 'mess_timezone', default Asia/Kolkata). */
+export const messToday = (): string => new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' });
 const dayMs = 86400000;
 const addDays = (d: string, n: number) =>
   new Date(Date.parse(`${d}T00:00:00Z`) + n * dayMs).toISOString().slice(0, 10);
@@ -310,14 +311,16 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     const partySize = Number(pBooking.party_size);
     const isSuite = !!pBooking.is_suite_booking;
 
-    if (!admin && checkIn < todayUtc()) throw new PgError('ERR_INVALID_DATES: Clerks cannot backdate bookings');
-    if (isSuite && !admin) throw new PgError('ERR_SUITE_ONLY_ADMIN');
-    if ((pGuests?.length ?? 0) !== partySize) throw new PgError('ERR_PARTY_MISMATCH');
     if (!['MFA', 'PI', 'LEAVE', 'TD'].includes(category)) {
       throw new PgError(`invalid input value for enum category: "${category}"`, '22P02');
     }
-    if (!(checkOut > checkIn)) {
-      throw new PgError('new row for relation "bookings" violates check constraint "check_stay_dates"', '23514');
+    if (!checkIn || !checkOut || !(checkOut > checkIn)) throw new PgError('ERR_INVALID_DATES');
+    if (!admin && checkIn < messToday()) throw new PgError('ERR_INVALID_DATES: Clerks cannot backdate bookings');
+    if (isSuite && !admin) throw new PgError('ERR_SUITE_ONLY_ADMIN');
+    if (!Array.isArray(pGuests) || pGuests.length !== partySize) throw new PgError('ERR_PARTY_MISMATCH');
+    const hasAllocs = Array.isArray(pAllocs) && pAllocs.length > 0;
+    if (pBooking.status === 'PENDING_ALLOTMENT' && hasAllocs) {
+      throw new PgError('ERR_INVALID_REQUEST: a pending allotment request cannot carry allocations');
     }
     if (partySize < 1 || partySize > 40) {
       throw new PgError('new row for relation "bookings" violates check constraint "bookings_party_size_check"', '23514');
@@ -334,8 +337,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       }
     }
 
-    const isPending =
-      pBooking.status === 'PENDING_ALLOTMENT' || !pAllocs || pAllocs.length === 0;
+    const isPending = pBooking.status === 'PENDING_ALLOTMENT' || !hasAllocs;
     const bookingStatus: BookingStatus = isPending ? 'PENDING_ALLOTMENT' : 'CONFIRMED';
 
     const bookingId = randomUUID();
@@ -384,10 +386,10 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       seqToGuest[String(g.seq)] = gid;
     }
 
-    for (const a of pAllocs ?? []) {
+    for (const a of hasAllocs ? pAllocs : []) {
       const guestId = seqToGuest[String(a.guest_seq)] ?? a.guest_id;
-      if (!guestId) {
-        throw new PgError('null value in column "guest_id" of relation "allocations" violates not-null constraint', '23502');
+      if (!guestId || !guestById(guestId) || guestById(guestId)!.booking_id !== bookingId) {
+        throw new PgError('ERR_INVALID_GUEST');
       }
       insertAllocation({
         id: randomUUID(),
@@ -404,6 +406,13 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       });
     }
 
+    if (hasAllocs) {
+      const seated = new Set(
+        db.allocations.filter((al) => al.booking_id === bookingId && al.status === 'ACTIVE').map((al) => al.guest_id),
+      );
+      if (seated.size !== partySize) throw new PgError('ERR_INCOMPLETE_ALLOTMENT');
+    }
+
     if (bookingStatus === 'PENDING_ALLOTMENT') {
       audit('booking_request_created', 'bookings', bookingId, { category, party_size: partySize, is_suite: isSuite });
     } else {
@@ -415,6 +424,49 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     emit('booking_guests');
 
     return bookingId;
+  }
+
+  /** public.internal_allot_booking(): all-or-nothing allotment of a pending request. */
+  function internalAllot(bookingId: string, allocations: Row[] | null | undefined) {
+    const b = bookingById(bookingId);
+    if (!b) throw new PgError('ERR_NOT_FOUND');
+    const unseated =
+      b.status === 'CONFIRMED' && !db.allocations.some((al) => al.booking_id === b.id && al.status === 'ACTIVE');
+    if (b.status !== 'PENDING_ALLOTMENT' && !unseated) throw new PgError('ERR_BOOKING_NOT_PENDING');
+    if (b.is_suite_booking && !isAdmin()) throw new PgError('ERR_SUITE_ONLY_ADMIN');
+    if (!allocations || allocations.length === 0) throw new PgError('ERR_EMPTY_ALLOCATIONS');
+
+    const seen = new Set<string>();
+    for (const al of allocations) {
+      let guest: Row | undefined;
+      if (al.guest_id) guest = db.booking_guests.find((g) => g.id === al.guest_id && g.booking_id === b.id);
+      else if (al.guest_seq != null) {
+        guest = db.booking_guests.find((g) => g.booking_id === b.id && g.seq === Number(al.guest_seq));
+      }
+      if (!guest || seen.has(guest.id)) throw new PgError('ERR_INVALID_GUEST');
+      seen.add(guest.id);
+
+      insertAllocation({
+        id: randomUUID(),
+        booking_id: b.id,
+        guest_id: guest.id,
+        room_id: al.room_id,
+        bed_slot: Number(al.bed_slot),
+        stay: b.stay,
+        status: 'ACTIVE',
+        created_by: uid(),
+        created_at: nowIso(),
+        updated_at: nowIso(),
+        deleted_at: null,
+      });
+    }
+    if (seen.size !== db.booking_guests.filter((g) => g.booking_id === b.id).length) {
+      throw new PgError('ERR_INCOMPLETE_ALLOTMENT');
+    }
+
+    b.status = 'CONFIRMED';
+    b.updated_at = nowIso();
+    audit('booking_allotted', 'bookings', b.id, { allocations_count: seen.size });
   }
 
   // ---- RPCs ----
@@ -534,58 +586,19 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
 
     allot_booking_rooms: (a) => {
       need(isActiveUser() && (hasPerm('create_booking') || isAdmin()));
-      const b = bookingById(a.p_booking_id);
-      if (!b) throw new PgError('ERR_NOT_FOUND');
-      if (b.status !== 'PENDING_ALLOTMENT') throw new PgError('ERR_BOOKING_NOT_PENDING');
-      if (b.is_suite_booking && !isAdmin()) throw new PgError('ERR_SUITE_ONLY_ADMIN');
-      if (!a.p_allocations || a.p_allocations.length === 0) throw new PgError('ERR_EMPTY_ALLOCATIONS');
-
-      for (const al of a.p_allocations) {
-        let guestId = al.guest_id || null;
-        if (!guestId && al.guest_seq != null) {
-          const bg = db.booking_guests.find((g) => g.booking_id === b.id && g.seq === Number(al.guest_seq));
-          if (bg) guestId = bg.id;
-        }
-        if (!guestId) {
-          const singleGuest = db.booking_guests.find((g) => g.booking_id === b.id);
-          if (singleGuest) guestId = singleGuest.id;
-        }
-        if (!guestId) throw new PgError('ERR_INVALID_GUEST');
-
-        insertAllocation({
-          id: randomUUID(),
-          booking_id: b.id,
-          guest_id: guestId,
-          room_id: al.room_id,
-          bed_slot: Number(al.bed_slot),
-          stay: b.stay,
-          status: 'ACTIVE',
-          created_by: uid(),
-          created_at: nowIso(),
-          updated_at: nowIso(),
-          deleted_at: null,
-        });
-      }
-
-      b.status = 'CONFIRMED';
-      b.updated_at = nowIso();
-      audit('booking_allotted', 'bookings', b.id, { allocations_count: a.p_allocations.length });
-      emit('bookings');
-      emit('allocations');
-      emit('booking_guests');
-      emit('rooms');
+      internalAllot(a.p_booking_id, a.p_allocations);
       return null;
     },
 
     cancel_booking: (a) => {
       need(isActiveUser() && hasPerm('cancel_booking'));
       const b = bookingById(a.p_id);
-      if (b) {
-        b.status = 'CANCELLED';
-        b.cancelled_at = nowIso();
-        b.cancel_reason_enc = a.p_reason_enc;
-        b.key_version = a.p_key_version;
-      }
+      if (!b) throw new PgError('ERR_NOT_FOUND');
+      if (b.status !== 'CONFIRMED' && b.status !== 'PENDING_ALLOTMENT') throw new PgError('ERR_BOOKING_NOT_ACTIVE');
+      b.status = 'CANCELLED';
+      b.cancelled_at = nowIso();
+      b.cancel_reason_enc = a.p_reason_enc;
+      b.key_version = a.p_key_version;
       db.allocations.forEach((x) => {
         if (x.booking_id === a.p_id && x.status === 'ACTIVE') x.status = 'RELEASED';
       });
@@ -808,13 +821,15 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       need(isActiveUser());
       const range: [string, string] = [a.p_check_in, a.p_check_out];
       const lower: Record<string, string[]> = { MFA: ['PI', 'LEAVE', 'TD'], PI: ['LEAVE', 'TD'] };
-      const today = todayUtc();
+      const today = messToday();
       return db.allocations
         .filter((al) => {
           if (al.status !== 'ACTIVE' || !overlaps(parseRange(al.stay), range)) return false;
           const r = roomById(al.room_id);
           const b = bookingById(al.booking_id);
-          return !!r && !!b && r.room_type !== 'SUITE' && (lower[a.p_category] ?? []).includes(b.category);
+          if (!r || !b || r.room_type === 'SUITE' || !r.is_active || r.deleted_at) return false;
+          if (db.room_closures.some((c) => c.room_id === r.id && overlaps(parseRange(c.period), range))) return false;
+          return (lower[a.p_category] ?? []).includes(b.category);
         })
         .sort((x, y) => (bookingById(x.booking_id)!.check_in < bookingById(y.booking_id)!.check_in ? -1 : x.id < y.id ? -1 : 1))
         .map((al) => {
@@ -851,17 +866,38 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       const guests: Row[] = inc.guests ?? [];
       let allocs: Row[] | undefined = inc.allocations;
 
-      const incomingCategory = booking?.category;
-      const mayDisplace = (inc: string, existing: string) =>
-        (inc === 'MFA' && ['PI', 'LEAVE', 'TD'].includes(existing)) ||
-        (inc === 'PI' && ['LEAVE', 'TD'].includes(existing));
+      // An existing pending request is allotted in place; its stored category and dates rule.
+      const existing = booking?.booking_id ? bookingById(booking.booking_id) : undefined;
+      if (booking?.booking_id && !existing) throw new PgError('ERR_NOT_FOUND');
+      if (existing?.is_suite_booking) throw new PgError('ERR_CANNOT_EVICT: a suite booking cannot displace other guests');
+      const incomingCategory = existing ? existing.category : booking?.category;
+      let incomingRange: [string, string];
+      if (existing) incomingRange = parseRange(existing.stay);
+      else {
+        if (!booking?.check_in || !booking?.check_out || !(booking.check_out > booking.check_in)) {
+          throw new PgError('ERR_INVALID_DATES');
+        }
+        incomingRange = [booking.check_in, booking.check_out];
+      }
+      const mayDisplace = (inc: string, existingCat: string) =>
+        (inc === 'MFA' && ['PI', 'LEAVE', 'TD'].includes(existingCat)) ||
+        (inc === 'PI' && ['LEAVE', 'TD'].includes(existingCat));
 
       const beds: Row[] = [];
       const displaced: string[] = [];
       for (const id of ids) {
         const al = db.allocations.find((x) => x.id === id && x.status === 'ACTIVE');
         if (!al) throw new PgError('ERR_ALLOCATION_NOT_ACTIVE');
+        if (existing && al.booking_id === existing.id) {
+          throw new PgError('ERR_CANNOT_EVICT: a booking cannot displace itself');
+        }
         const b = bookingById(al.booking_id);
+        if (roomById(al.room_id)?.room_type === 'SUITE') {
+          throw new PgError('ERR_CANNOT_EVICT: suite guests cannot be displaced');
+        }
+        if (!overlaps(parseRange(al.stay), incomingRange)) {
+          throw new PgError('ERR_EVICTION_NO_OVERLAP: that bed is not occupied during the incoming stay');
+        }
         if (!mayDisplace(incomingCategory, b?.category)) {
           throw new PgError(`ERR_CANNOT_EVICT: ${incomingCategory} cannot displace ${b?.category}`);
         }
@@ -874,12 +910,21 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
         }
       }
       if (!allocs || allocs.length === 0) {
-        if (beds.length < guests.length) {
+        const seqs = existing
+          ? db.booking_guests.filter((g) => g.booking_id === existing.id).map((g) => g.seq).sort((x, y) => x - y)
+          : guests.map((g, i) => g.seq ?? i + 1);
+        if (beds.length < seqs.length) {
           throw new PgError('ERR_NOT_ENOUGH_BEDS: select at least one bed per incoming guest');
         }
-        allocs = guests.map((g, i) => ({ guest_seq: g.seq ?? i + 1, room_id: beds[i].room_id, bed_slot: beds[i].bed_slot }));
+        allocs = seqs.map((seq, i) => ({ guest_seq: seq, room_id: beds[i].room_id, bed_slot: beds[i].bed_slot }));
       }
-      const newId = createBooking(booking, guests, allocs);
+      let newId: string;
+      if (existing) {
+        internalAllot(existing.id, allocs);
+        newId = existing.id;
+      } else {
+        newId = createBooking(booking, guests, allocs);
+      }
       ids.forEach((id, i) => {
         db.evictions.push({
           id: randomUUID(),
@@ -900,7 +945,24 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     record_denial: (a) => {
       if (['MFA', 'PI'].includes(a.p_category)) throw new PgError('ERR_CANNOT_DENY_PRIORITY');
       need(isActiveUser() && hasPerm('deny_request'));
+      if (!a.p_check_in || !a.p_check_out || !(a.p_check_out > a.p_check_in)) throw new PgError('ERR_INVALID_DATES');
+      if (!a.p_party_size || a.p_party_size < 1) throw new PgError('ERR_PARTY_MISMATCH');
+      let pending: Row | undefined;
+      if (a.p_booking_id) {
+        pending = bookingById(a.p_booking_id);
+        if (!pending) throw new PgError('ERR_NOT_FOUND');
+        if (pending.category !== a.p_category) throw new PgError('ERR_CANNOT_DENY_PRIORITY');
+        const unseated =
+          pending.status === 'CONFIRMED' &&
+          !db.allocations.some((al) => al.booking_id === pending!.id && al.status === 'ACTIVE');
+        if (pending.status !== 'PENDING_ALLOTMENT' && !unseated) throw new PgError('ERR_BOOKING_NOT_PENDING');
+      }
       const id = a.p_id ?? randomUUID();
+      if (pending) {
+        pending.status = 'CANCELLED';
+        pending.cancelled_at = nowIso();
+        pending.updated_at = nowIso();
+      }
       db.denials.push({
         id,
         category: a.p_category,
@@ -912,7 +974,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
         denied_by: uid(),
         created_at: nowIso(),
       });
-      audit('booking_denied', 'denials', id, { category: a.p_category, party_size: a.p_party_size });
+      audit('booking_denied', 'denials', id, { category: a.p_category, party_size: a.p_party_size, booking_id: a.p_booking_id ?? null });
       return id;
     },
 
@@ -963,7 +1025,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       if (!c) throw new PgError('ERR_NOT_FOUND');
       if (!isAdmin() && roomById(c.room_id)?.room_type === 'SUITE') throw new PgError('ERR_SUITE_ONLY_ADMIN');
       const [from, to] = parseRange(c.period);
-      const today = todayUtc();
+      const today = messToday();
       if (from >= today) db.room_closures = db.room_closures.filter((x) => x.id !== c.id);
       else if (to > today) c.period = rangeStr(from, today);
       audit('room_closure_ended', 'room_closures', c.id, { room_id: c.room_id });
@@ -1005,7 +1067,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       if (r.room_type === 'SUITE' && !isAdmin()) throw new PgError('ERR_SUITE_ONLY_ADMIN');
 
       const hasActive = db.allocations.some(
-        (al) => al.room_id === a.p_room_id && al.status === 'ACTIVE' && parseRange(al.stay)[1] > todayUtc()
+        (al) => al.room_id === a.p_room_id && al.status === 'ACTIVE' && parseRange(al.stay)[1] > messToday()
       );
       if (hasActive) {
         throw new PgError('ERR_ROOM_HAS_ACTIVE_BOOKINGS');
@@ -1016,7 +1078,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       r.updated_at = nowIso();
 
       db.room_closures = db.room_closures.filter(
-        (c) => !(c.room_id === a.p_room_id && parseRange(c.period)[0] >= todayUtc())
+        (c) => !(c.room_id === a.p_room_id && parseRange(c.period)[0] >= messToday())
       );
 
       audit('room_deleted', 'rooms', a.p_room_id, { room_type: r.room_type });
@@ -1039,7 +1101,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
 
       const oldCheckIn = b.check_in;
       const oldCheckOut = b.check_out;
-      const today = todayUtc();
+      const today = messToday();
 
       if (oldCheckIn <= today) {
         if (newCheckIn !== oldCheckIn) {
@@ -1368,7 +1430,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       const data = fn(args);
       persist();
       // Only booking writes notify realtime subscribers; read RPCs must not (they'd refetch forever).
-      if (['create_booking', 'cancel_booking', 'approve_eviction', 'allot_booking_rooms', 'create_booking_request'].includes(name)) {
+      if (['create_booking', 'cancel_booking', 'approve_eviction', 'allot_booking_rooms', 'create_booking_request', 'record_denial', 'update_booking_dates'].includes(name)) {
         ['allocations', 'bookings', 'booking_guests', 'rooms'].forEach(emit);
       }
       return { data: data === undefined ? null : clone(data), error: null };

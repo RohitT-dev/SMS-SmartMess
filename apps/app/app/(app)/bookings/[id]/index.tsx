@@ -28,6 +28,7 @@ import {
 import { humanizeStatus } from '../../../../src/lib/labels';
 import { describeGuest } from '../../../../src/features/bookings/party';
 import { fetchRoomDayStates } from '../../../../src/features/bookings/roomState';
+import { alternatesHorizonEnd } from '../../../../src/features/bookings/planBooking';
 import { useRoomNames } from '../../../../src/features/rooms/useRoomNames';
 import {
   planAllotment,
@@ -36,6 +37,7 @@ import {
   type RankCode,
   type GuestRelation,
   type GuestDemand,
+  type RoomType,
 } from '@sms/core';
 
 export default function BookingDetailRecordScreen() {
@@ -92,8 +94,9 @@ export default function BookingDetailRecordScreen() {
   const { data: roomNames } = useRoomNames();
 
   const { data: roomStates, isLoading: loadingRoomStates } = useQuery({
-    queryKey: ['daily_room_state', booking?.check_in, booking?.check_out],
-    queryFn: () => fetchRoomDayStates(booking!.check_in, booking!.check_out),
+    // Past the stay itself up to the alternate-window horizon, so a full house can offer new dates.
+    queryKey: ['daily_room_state', 'allotment_plan', booking?.check_in, booking?.check_out],
+    queryFn: () => fetchRoomDayStates(booking!.check_in, alternatesHorizonEnd(booking!.check_out)),
     enabled: isPendingAllotment && !!booking?.check_in && !!booking?.check_out,
   });
 
@@ -118,6 +121,7 @@ export default function BookingDetailRecordScreen() {
         checkIn: booking.check_in,
         checkOut: booking.check_out,
         guests: guestsDemand,
+        preferredRoomType: (booking.preferred_room_type ?? undefined) as RoomType | undefined,
       },
       roomStates,
     );
@@ -138,11 +142,7 @@ export default function BookingDetailRecordScreen() {
         p_allocations: allocs,
       });
       if (error) {
-        if (
-          error.code === 'PGRST202' ||
-          error.message?.includes('schema cache') ||
-          error.message?.includes('allot_booking_rooms')
-        ) {
+        if (error.code === 'PGRST202' || error.message?.includes('schema cache')) {
           openCustomPlacement();
           return;
         }
@@ -163,6 +163,23 @@ export default function BookingDetailRecordScreen() {
     } finally {
       setAllotting(false);
     }
+  };
+
+  const openResolution = () => {
+    if (!booking) return;
+    router.push({
+      pathname: '/(app)/bookings/new/alternates',
+      params: {
+        payload: JSON.stringify({
+          bookingId: booking.id,
+          category: booking.category,
+          checkIn: booking.check_in,
+          checkOut: booking.check_out,
+          preferredRoomType: booking.preferred_room_type || undefined,
+          guests: guestsDemand,
+        }),
+      },
+    } as any);
   };
 
   const openCustomPlacement = () => {
@@ -440,11 +457,21 @@ export default function BookingDetailRecordScreen() {
                   type="warning"
                   message="Currently no free rooms or compatible beds automatically match this request for the requested dates. You can manually inspect and assign any available room."
                 />
+                {allotmentPlan.kind === 'ALTERNATES' ? (
+                  <Text style={{ color: colors.muted, marginTop: spacing.sm, fontSize: typography.sm }}>
+                    Next free window of the same length starts {allotmentPlan.windows[0].checkIn}.
+                  </Text>
+                ) : null}
                 {canAllot && (
-                  <View style={{ marginTop: spacing.md }}>
+                  <View style={{ marginTop: spacing.md, gap: spacing.sm }}>
+                    <Button
+                      label="Alternate dates, eviction or denial →"
+                      variant="primary"
+                      onPress={openResolution}
+                    />
                     <Button
                       label="Choose Room & Assign Bed →"
-                      variant="primary"
+                      variant="secondary"
                       onPress={openCustomPlacement}
                     />
                   </View>

@@ -280,7 +280,8 @@ export default function NewBookingWizardScreen() {
             is_suite_booking: false,
             preferred_room_type: prefType,
             status: 'PENDING_ALLOTMENT',
-            notes_enc: currentNotes.trim() || null,
+            // Remarks travel in the encrypted guest record (persistGuestDetails). notes_enc is a
+            // ciphertext column and must never receive plain text.
             key_version: getActiveKeyVersion(),
           },
           p_guests: guestRowsPayload(party),

@@ -37,3 +37,11 @@ This document records deliberate design and engineering decisions where requirem
 9. **Single Admin Default**: Exactly one Admin user is configured by default; creating or promoting a second Admin requires an explicit confirmation modal.
    - *Reason*: Enforces strict separation of duty and prevents unauthorized key-sharing or administrative privilege escalation.
    - *How to change*: Update `apps/app/app/(app)/admin/users.tsx` and the `set_user_role` RPC in `0007_rpcs.sql`.
+
+10. **Mess Calendar Day**: Backdating and "stay has started" rules use the mess's own calendar day (`mess_today()`, Asia/Kolkata by default), not the UTC date.
+   - *Reason*: Between 00:00 and 05:30 IST the UTC date is still yesterday, which let clerks backdate by a day.
+   - *How to change*: `UPDATE public.app_config SET value = '"<IANA zone>"' WHERE key = 'mess_timezone';`
+
+11. **Eviction Displaces Whole Allocations**: An evicted bed is released for the guest's entire stay, not just the nights the incoming party needs; the bed must overlap the incoming stay and may not be in a suite.
+   - *Reason*: A displaced guest has to move out; keeping a bed for the nights before or after would leave a half-stay nobody planned for.
+   - *How to change*: Split the evicted allocation around the incoming stay inside `approve_eviction` (migration `0028`).

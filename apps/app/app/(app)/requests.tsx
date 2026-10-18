@@ -19,14 +19,19 @@ import { EmptyState } from '../../src/ui/primitives/EmptyState';
 import { layout, spacing, typography } from '../../src/ui/tokens';
 import { supabase } from '../../src/lib/supabase';
 import { logAction } from '../../src/lib/activityLog';
-import { decryptGuestPii } from '../../src/features/crypto-session/cryptoSession';
-import type { Category, Gender, RankCode } from '@sms/core';
+import { decryptGuestPii, encryptReason, getActiveKeyVersion } from '../../src/features/crypto-session/cryptoSession';
+import { fetchPendingAllotment } from '../../src/features/bookings/pendingRequests';
+import { userErrorMessage } from '../../src/lib/userError';
+import { Banner } from '../../src/ui/primitives/Banner';
+import type { Category, Gender, GuestRelation, RankCode } from '@sms/core';
 
 interface PendingGuest {
   id: string;
   seq: number;
   gender: Gender;
-  rank_code: RankCode;
+  /** Null for a civilian. */
+  rank_code: RankCode | null;
+  relation?: GuestRelation | null;
   guest_code?: string;
   guest_name?: string;
   unit?: string | null;
@@ -52,31 +57,14 @@ export default function BookingRequestsScreen() {
   const colors = useThemeStore((s) => s.colors);
 
   const [actioningId, setActioningId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   // Query all pending booking requests (either PENDING_ALLOTMENT or unallotted with zero active allocations)
   const { data: requests, isLoading, refetch } = useQuery({
     queryKey: ['pending_booking_requests'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('bookings')
-        .select('*, booking_guests(*), allocations(*)')
-        .not('status', 'in', '("CANCELLED","DISPLACED","COMPLETED")')
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-
-      // Filter: Booking is pending room allotment if:
-      // 1. Status is PENDING_ALLOTMENT, OR
-      // 2. Status is CONFIRMED but it has ZERO active allocations (created without room placement)
-      const unallotted = (data || []).filter((b: any) => {
-        if (b.status === 'CANCELLED' || b.status === 'DISPLACED' || b.status === 'COMPLETED') return false;
-        if (b.status === 'PENDING_ALLOTMENT') return true;
-        const activeAllocs = (b.allocations || []).filter((a: any) => a.status === 'ACTIVE');
-        return activeAllocs.length === 0;
-      });
-
-      return unallotted as PendingBookingRequest[];
-    },
+    queryFn: () =>
+      // PENDING_ALLOTMENT requests, plus confirmed bookings that hold no active bed.
+      fetchPendingAllotment<PendingBookingRequest & { allocations: Array<{ status: string }> }>('*, booking_guests(*)'),
   });
 
   useFocusEffect(
@@ -151,6 +139,7 @@ export default function BookingRequestsScreen() {
           return {
             gender: g.gender,
             rankCode: g.rank_code,
+            relation: g.relation ?? undefined,
             name: g.guest_name || pii?.name || undefined,
             serviceNumber: g.service_number || pii?.serviceNumber || undefined,
             unit: g.unit || pii?.unit || undefined,
@@ -167,11 +156,18 @@ export default function BookingRequestsScreen() {
 
   const handleCancelRequest = async (reqId: string) => {
     setActioningId(reqId);
+    setActionError(null);
     try {
+      const reasonEnc = encryptReason(
+        'bookings',
+        'cancel_reason_enc',
+        reqId,
+        'Cancelled by operator from pending requests queue',
+      );
       const { error } = await supabase.rpc('cancel_booking', {
         p_id: reqId,
-        p_reason_enc: 'Cancelled by operator from pending requests queue',
-        p_key_version: 1,
+        p_reason_enc: reasonEnc,
+        p_key_version: getActiveKeyVersion(),
       });
       if (error) throw error;
       logAction('bookings.cancel_request', {
@@ -180,9 +176,10 @@ export default function BookingRequestsScreen() {
         meta: { status: 'CANCELLED' },
       });
       queryClient.invalidateQueries({ queryKey: ['pending_booking_requests'] });
+      queryClient.invalidateQueries({ queryKey: ['tabbar_pending_requests_count'] });
       queryClient.invalidateQueries({ queryKey: ['past_bookings_list'] });
     } catch (err) {
-      console.error('Failed to cancel request', err);
+      setActionError(userErrorMessage(err, 'Could not cancel this request.'));
     } finally {
       setActioningId(null);
     }
@@ -200,6 +197,10 @@ export default function BookingRequestsScreen() {
             Review booking requests waiting for room allotment. Tap any guest name or click &quot;Choose Room &amp; Assign Bed&quot; to pick an available room for their stay.
           </Text>
         </Card>
+
+        {actionError ? (
+          <Banner type="error" message={actionError} style={{ marginBottom: spacing.md }} />
+        ) : null}
 
         {isLoading ? (
           <View style={{ padding: spacing.xl, alignItems: 'center' }}>

@@ -165,101 +165,111 @@ export default function RoomAllotmentScreen() {
     [rooms],
   );
 
-  // Helper: compute strictly available rooms for a given guest index (excludes full rooms & sharing conflicts)
+  // Helper: compute strictly available rooms for a given guest index (excludes full rooms & sharing
+  // conflicts). `asg` lets the auto-select pass thread the choices it has just made.
   const getAvailableRoomsForGuest = useCallback(
-    (guestIdx: number) => {
+    (guestIdx: number, asg: Record<number, Assignment> = assignments) => {
       const guest = guests[guestIdx];
       if (!guest || !states) return [];
 
-      return filteredRooms
-        .filter((r) => {
-          const occ = occupancy[r.id];
-          if (occ?.closed) return false;
+      const result: Array<(typeof filteredRooms)[number] & { availableBeds: number[] }> = [];
+      for (const r of filteredRooms) {
+        const occ = occupancy[r.id];
+        if (occ?.closed) continue;
 
-          // Which beds in room r are taken by OTHER guests in this session?
-          const sessionTakenBeds = new Set<number>();
-          guests.forEach((_, j) => {
-            if (j !== guestIdx && assignments[j]?.roomId === r.id) {
-              sessionTakenBeds.add(assignments[j].bedSlot);
-            }
-          });
-
-          const totalTaken = new Set([...(occ ? occ.takenBeds : []), ...sessionTakenBeds]);
-          const freeBeds = [1, 2].filter((b) => !totalTaken.has(b));
-
-          // STRICT: Rooms with 0 free beds are completely excluded from the dropdown!
-          if (freeBeds.length === 0) return false;
-
-          // Sharing rule with guests already staying there (see canShareRoom)
-          if (occ && occ.occupants.some((o) => !canShareRoom(personOf(guestIdx), o))) return false;
-
-          // Sharing rule with the rest of this party placed in the same room
-          const sessionConflict = guests.some((_, j) => {
-            if (j !== guestIdx && assignments[j]?.roomId === r.id) {
-              return !canShareRoom(personOf(guestIdx), personOf(j));
-            }
-            return false;
-          });
-          if (sessionConflict) return false;
-
-          return true;
-        })
-        .map((r) => {
-          const occ = occupancy[r.id];
-          const sessionTakenBeds = new Set<number>();
-          guests.forEach((_, j) => {
-            if (j !== guestIdx && assignments[j]?.roomId === r.id) {
-              sessionTakenBeds.add(assignments[j].bedSlot);
-            }
-          });
-          const totalTaken = new Set([...(occ ? occ.takenBeds : []), ...sessionTakenBeds]);
-          const freeBeds = [1, 2].filter((b) => !totalTaken.has(b));
-
-          return {
-            ...r,
-            availableBeds: freeBeds,
-          };
+        // Which beds in room r are taken by OTHER guests in this session?
+        const sessionTakenBeds = new Set<number>();
+        guests.forEach((_, j) => {
+          if (j !== guestIdx && asg[j]?.roomId === r.id) sessionTakenBeds.add(asg[j].bedSlot);
         });
+
+        const totalTaken = new Set([...(occ ? occ.takenBeds : []), ...sessionTakenBeds]);
+        const freeBeds = [1, 2].filter((b) => !totalTaken.has(b));
+
+        // STRICT: Rooms with 0 free beds are completely excluded from the dropdown!
+        if (freeBeds.length === 0) continue;
+
+        // Sharing rule with guests already staying there (see canShareRoom)
+        if (occ && occ.occupants.some((o) => !canShareRoom(personOf(guestIdx), o))) continue;
+
+        // Sharing rule with the rest of this party placed in the same room
+        const sessionConflict = guests.some(
+          (_, j) => j !== guestIdx && asg[j]?.roomId === r.id && !canShareRoom(personOf(guestIdx), personOf(j)),
+        );
+        if (sessionConflict) continue;
+
+        result.push({ ...r, availableBeds: freeBeds });
+      }
+      return result;
     },
     [filteredRooms, guests, assignments, occupancy, states, personOf]
   );
 
-  // Auto-select target room or first available room when states load
+  // Auto-select a valid room AND bed for every guest once live vacancy has loaded. Guests are
+  // handled one after another against the choices already made in this pass, so two guests are
+  // never given the same bed.
   useEffect(() => {
     if (!states || !rooms || statesLoading) return;
 
-    guests.forEach((_, idx) => {
-      const avail = getAvailableRoomsForGuest(idx);
-      const currentRoomId = assignments[idx]?.roomId;
-      const isCurrentValid = avail.some((r) => r.id === currentRoomId);
+    const next: Record<number, Assignment> = { ...assignments };
+    let changed = false;
 
-      // If user came with a pre-selected target room for guest 0, check if it's available
-      if (idx === 0 && parsed?.preferredRoomId) {
-        const targetAvail = avail.find((r) => r.id === parsed.preferredRoomId);
-        if (targetAvail) {
-          const targetSlot =
-            parsed.preferredBedSlot && targetAvail.availableBeds.includes(parsed.preferredBedSlot)
-              ? parsed.preferredBedSlot
-              : (targetAvail.availableBeds[0] as 1 | 2);
-          if (currentRoomId !== targetAvail.id || assignments[0]?.bedSlot !== targetSlot) {
-            setAssignments((prev) => ({
-              ...prev,
-              [0]: { roomId: targetAvail.id, bedSlot: targetSlot },
-            }));
-          }
-          return;
-        }
+    guests.forEach((_, idx) => {
+      const avail = getAvailableRoomsForGuest(idx, next);
+      const current = next[idx];
+      const currentRoom = current ? avail.find((r) => r.id === current.roomId) : undefined;
+      if (currentRoom && currentRoom.availableBeds.includes(current.bedSlot)) return;
+
+      // Same room, wrong bed (usually because another guest took it): move to its free bed.
+      if (currentRoom) {
+        next[idx] = { roomId: currentRoom.id, bedSlot: currentRoom.availableBeds[0] as 1 | 2 };
+        changed = true;
+        return;
       }
 
-      if (!isCurrentValid && avail.length > 0) {
-        const first = avail[0];
-        setAssignments((prev) => ({
-          ...prev,
-          [idx]: { roomId: first.id, bedSlot: first.availableBeds[0] as 1 | 2 },
-        }));
+      // A pre-selected target room wins for the primary guest if it is still available.
+      const target = idx === 0 && parsed?.preferredRoomId ? avail.find((r) => r.id === parsed.preferredRoomId) : undefined;
+      if (target) {
+        const slot =
+          parsed?.preferredBedSlot && target.availableBeds.includes(parsed.preferredBedSlot)
+            ? parsed.preferredBedSlot
+            : (target.availableBeds[0] as 1 | 2);
+        next[idx] = { roomId: target.id, bedSlot: slot };
+        changed = true;
+        return;
+      }
+
+      if (avail.length > 0) {
+        next[idx] = { roomId: avail[0].id, bedSlot: avail[0].availableBeds[0] as 1 | 2 };
+        changed = true;
       }
     });
+
+    if (changed) setAssignments(next);
   }, [states, rooms, statesLoading, getAvailableRoomsForGuest, guests, assignments, parsed]);
+
+  /** Guests for whom no room in the current filter can take them. */
+  const guestsWithoutRoom = useMemo(
+    () => (states && !statesLoading ? guests.map((_, i) => i).filter((i) => getAvailableRoomsForGuest(i).length === 0) : []),
+    [states, statesLoading, guests, getAvailableRoomsForGuest],
+  );
+
+  const openResolution = () => {
+    if (!parsed) return;
+    router.push({
+      pathname: '/(app)/bookings/new/alternates',
+      params: {
+        payload: JSON.stringify({
+          bookingId: parsed.bookingId,
+          category,
+          checkIn,
+          checkOut,
+          preferredRoomType: parsed.preferredRoomType,
+          guests: guests.map((g) => ({ gender: g.gender, rankCode: g.rankCode, relation: g.relation })),
+        }),
+      },
+    } as any);
+  };
 
   // Validation rules
   const validationErrors = useMemo(() => {
@@ -331,63 +341,21 @@ export default function RoomAllotmentScreen() {
       let allottedSuccessfully = false;
 
       if (parsed.bookingId) {
+        // The request already exists: allot it in place. Never create a second booking here,
+        // otherwise a request allotted meanwhile by someone else would be booked twice.
         const { error } = await supabase.rpc('allot_booking_rooms', {
           p_booking_id: parsed.bookingId,
           p_allocations: allocs,
         });
+        if (error) throw error;
 
-        if (!error) {
-          allottedSuccessfully = true;
-          finalBookingId = parsed.bookingId;
-          logAction('bookings.allot', {
-            entity: 'bookings',
-            entityId: parsed.bookingId,
-            meta: { mode: 'manual', party_size: guests.length },
-          });
-        } else if (
-          error.code === 'PGRST202' ||
-          error.message?.includes('schema cache') ||
-          error.message?.includes('allot_booking_rooms') ||
-          error.message?.includes('ERR_BOOKING_NOT_PENDING')
-        ) {
-          // Resilient fallback for databases where allot_booking_rooms migration hasn't been applied yet:
-          // Directly create the confirmed booking with allocations via create_booking
-          const { data: newBkgId, error: directErr } = await supabase.rpc('create_booking', {
-            p_booking: {
-              category,
-              check_in: checkIn,
-              check_out: checkOut,
-              party_size: guests.length,
-              is_suite_booking: false,
-              preferred_room_type: roomTypeFilter === 'ALL' ? null : roomTypeFilter,
-            },
-            p_guests: guestRowsPayload(guests),
-            p_allocations: allocs,
-          });
-
-          if (directErr) throw directErr;
-
-          allottedSuccessfully = true;
-          finalBookingId = newBkgId as string;
-          logAction('bookings.allot_direct', {
-            entity: 'bookings',
-            entityId: newBkgId as string,
-            meta: { mode: 'direct_allotment', party_size: guests.length },
-          });
-
-          // Cancel the old unallotted placeholder booking so it is removed from requests
-          try {
-            await supabase.rpc('cancel_booking', {
-              p_id: parsed.bookingId,
-              p_reason_enc: 'Allotted via direct booking',
-              p_key_version: 1,
-            });
-          } catch {
-            // Ignore cancel error if already superseded
-          }
-        } else {
-          throw error;
-        }
+        allottedSuccessfully = true;
+        finalBookingId = parsed.bookingId;
+        logAction('bookings.allot', {
+          entity: 'bookings',
+          entityId: parsed.bookingId,
+          meta: { mode: 'manual', party_size: guests.length },
+        });
       } else {
         const { data: bookingId, error } = await supabase.rpc('create_booking', {
           p_booking: {
@@ -417,12 +385,16 @@ export default function RoomAllotmentScreen() {
         try {
           const { data: gRows } = await supabase
             .from('booking_guests')
-            .select('id, seq')
+            .select('id, seq, details')
             .eq('booking_id', finalBookingId)
             .order('seq', { ascending: true });
 
           if (gRows && gRows.length > 0) {
             for (let idx = 0; idx < gRows.length; idx++) {
+              // Details saved earlier (request intake or Guest Details) are never rewritten here:
+              // this screen does not carry the ID number or remarks, and the encrypted record
+              // is replaced as a whole.
+              if (gRows[idx].details === 'COMPLETE') continue;
               const gInfo = guestWithDetails(idx);
               // A civilian whose name was not entered yet is completed later from Guest Details.
               if (gInfo && (gInfo.rankCode || gInfo.name?.trim())) {
@@ -518,6 +490,23 @@ export default function RoomAllotmentScreen() {
           {submitError && (
             <Banner type="error" message={submitError} style={{ marginTop: spacing.md }} />
           )}
+
+          {guestsWithoutRoom.length > 0 && parsed.bookingId ? (
+            <View style={{ marginTop: spacing.md }}>
+              <Banner
+                type="warning"
+                message={`No room can take ${
+                  guestsWithoutRoom.length === 1 ? `Guest ${guestsWithoutRoom[0] + 1}` : `${guestsWithoutRoom.length} guests`
+                } for these dates${roomTypeFilter === 'ALL' ? '' : ' in this room category'}. Widen the category filter, or review alternate dates, priority eviction or denial.`}
+              />
+              <Button
+                label="Alternate dates, eviction or denial →"
+                variant="secondary"
+                onPress={openResolution}
+                style={{ marginTop: spacing.sm }}
+              />
+            </View>
+          ) : null}
         </Card>
 
         {guests.map((g, idx) => {

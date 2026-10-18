@@ -16,7 +16,7 @@ import {
   type RankCode,
   type RoomType,
 } from '@sms/core';
-import { createDevSupabase, DEV_USERS } from './devBackend';
+import { createDevSupabase, DEV_USERS, messToday } from './devBackend';
 import { mapRoomDayState } from '../features/bookings/mapRoomState';
 import { userErrorMessage } from '../lib/userError';
 import { addDaysToDateString } from '../lib/dates';
@@ -25,7 +25,7 @@ import { buildPastBookingsHtml } from '../features/reports/pastBookingsHtml';
 
 type Sb = ReturnType<typeof createDevSupabase> & { auth: any };
 
-const today = new Date().toISOString().slice(0, 10); // backend CURRENT_DATE is UTC
+const today = messToday(); // public.mess_today(): the mess's own calendar date (IST)
 const d = (n: number) => addDaysToDateString(today, n);
 
 const G = (gender: Gender, rankCode: RankCode): GuestDemand => ({ gender, rankCode });
@@ -525,18 +525,19 @@ describe('closures, concurrency, rules', () => {
     const g = [{ seq: 1, gender: 'M', rank_code: 'FO' }];
     const a = [{ guest_seq: 1, room_id: roomIds['N-01'], bed_slot: 1 }];
     expect((await sb.rpc('create_booking', { p_booking: { ...base, party_size: 2 }, p_guests: g, p_allocations: a })).error?.message).toContain('ERR_PARTY_MISMATCH');
-    expect((await sb.rpc('create_booking', { p_booking: { ...base, check_out: d(0) }, p_guests: g, p_allocations: a })).error?.message).toContain('check_stay_dates');
-    expect((await sb.rpc('create_booking', { p_booking: { ...base, check_out: d(-1) }, p_guests: g, p_allocations: a })).error?.message).toContain('check_stay_dates');
+    expect((await sb.rpc('create_booking', { p_booking: { ...base, check_out: d(0) }, p_guests: g, p_allocations: a })).error?.message).toContain('ERR_INVALID_DATES');
+    expect((await sb.rpc('create_booking', { p_booking: { ...base, check_out: d(-1) }, p_guests: g, p_allocations: a })).error?.message).toContain('ERR_INVALID_DATES');
     expect((await sb.rpc('create_booking', { p_booking: { ...base, category: 'VIP' }, p_guests: g, p_allocations: a })).error).not.toBeNull();
     expect((await sb.rpc('create_booking', { p_booking: { ...base, party_size: 0 }, p_guests: [], p_allocations: [] })).error).not.toBeNull();
   });
 
-  it('cancelling frees the beds for a new booking and double-cancel is harmless', async () => {
+  it('cancelling frees the beds for a new booking and a second cancel is rejected without touching anything', async () => {
     const a = await book({ checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO')], pref: 'VIP' });
     expect((await sb.rpc('cancel_booking', { p_id: a.id, p_reason_enc: 'enc', p_key_version: 1 })).error).toBeNull();
     const b = await book({ checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO')], pref: 'VIP' });
     expect(b.placements[0].room).toBe('V-01');
-    expect((await sb.rpc('cancel_booking', { p_id: a.id, p_reason_enc: 'enc', p_key_version: 1 })).error).toBeNull();
+    expect((await sb.rpc('cancel_booking', { p_id: a.id, p_reason_enc: 'enc', p_key_version: 1 })).error?.message).toContain('ERR_BOOKING_NOT_ACTIVE');
+    expect((await sb.rpc('cancel_booking', { p_id: crypto.randomUUID(), p_reason_enc: 'enc', p_key_version: 1 })).error?.message).toContain('ERR_NOT_FOUND');
     // the second booking is untouched
     const { data } = await sb.from('bookings').select('*').eq('id', b.id).single();
     expect(data.status).toBe('CONFIRMED');
@@ -1895,5 +1896,126 @@ describe('civilian guests', () => {
     const res = await sb.rpc('set_guest_pii', { p_guest_id: guests[1].id, p_pii_enc: 'cipher', p_blind: null, p_key_version: 1 });
     expect(res.error).toBeNull();
     expect((await sb.rpc('search_guests_by_blind_index', { p_blind: null })).data).toEqual([]);
+  });
+});
+
+describe('booking logic review fixes', () => {
+  const requestFor = async (guests: GuestDemand[], category: Category = 'LEAVE', checkIn = d(0), checkOut = d(2)) => {
+    const { data, error } = await sb.rpc('create_booking_request', {
+      p_booking: { category, check_in: checkIn, check_out: checkOut, party_size: guests.length, is_suite_booking: false },
+      p_guests: guestRowsPayload(guests),
+    });
+    expect(error, error?.message).toBeNull();
+    return data as string;
+  };
+  const allocationsOf = async (bookingId: string) =>
+    ((await sb.from('allocations').select('*').eq('booking_id', bookingId)).data ?? []) as any[];
+
+  it('allotment must seat every guest: a partial allotment is rejected and nothing is saved', async () => {
+    const id = await requestFor([G('M', 'FO'), G('M', 'FO')]);
+    const res = await sb.rpc('allot_booking_rooms', {
+      p_booking_id: id,
+      p_allocations: [{ guest_seq: 1, room_id: roomIds['N-01'], bed_slot: 1 }],
+    });
+    expect(res.error?.message).toContain('ERR_INCOMPLETE_ALLOTMENT');
+    expect((await sb.from('bookings').select('*').eq('id', id).single()).data.status).toBe('PENDING_ALLOTMENT');
+    expect(await allocationsOf(id)).toHaveLength(0);
+  });
+
+  it('allotment never falls back to guest #1 for an unknown guest or a repeated guest', async () => {
+    const id = await requestFor([G('M', 'FO'), G('M', 'FO')]);
+    const unknown = await sb.rpc('allot_booking_rooms', {
+      p_booking_id: id,
+      p_allocations: [
+        { guest_seq: 1, room_id: roomIds['N-01'], bed_slot: 1 },
+        { guest_seq: 9, room_id: roomIds['N-01'], bed_slot: 2 },
+      ],
+    });
+    expect(unknown.error?.message).toContain('ERR_INVALID_GUEST');
+    const repeated = await sb.rpc('allot_booking_rooms', {
+      p_booking_id: id,
+      p_allocations: [
+        { guest_seq: 1, room_id: roomIds['N-01'], bed_slot: 1 },
+        { guest_seq: 1, room_id: roomIds['N-01'], bed_slot: 2 },
+      ],
+    });
+    expect(repeated.error?.message).toContain('ERR_INVALID_GUEST');
+    expect(await allocationsOf(id)).toHaveLength(0);
+  });
+
+  it('create_booking rejects allocations that leave a guest without a bed', async () => {
+    const a = { checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO'), G('M', 'FO')] };
+    const payload = bookingPayload(a, [{ guestIndex: 0, roomId: roomIds['N-01'], bedSlot: 1 }]);
+    const res = await sb.rpc('create_booking', payload);
+    expect(res.error?.message).toContain('ERR_INCOMPLETE_ALLOTMENT');
+    expect(((await sb.from('bookings').select('*')).data ?? []).length).toBe(0);
+  });
+
+  it('a pending-allotment request cannot carry allocations', async () => {
+    const a = { checkIn: d(0), checkOut: d(2), guests: [G('M', 'FO')] };
+    const payload = bookingPayload(a, [{ guestIndex: 0, roomId: roomIds['N-01'], bedSlot: 1 }]);
+    payload.p_booking = { ...payload.p_booking, status: 'PENDING_ALLOTMENT' } as typeof payload.p_booking;
+    const res = await sb.rpc('create_booking', payload);
+    expect(res.error?.message).toContain('ERR_INVALID_REQUEST');
+  });
+
+  it('cancelling an unknown booking fails instead of writing an audit row', async () => {
+    const before = ((await sb.from('audit_log').select('*')).data ?? []).length;
+    const res = await sb.rpc('cancel_booking', { p_id: crypto.randomUUID(), p_reason_enc: 'x', p_key_version: 1 });
+    expect(res.error?.message).toContain('ERR_NOT_FOUND');
+    expect(((await sb.from('audit_log').select('*')).data ?? []).length).toBe(before);
+  });
+
+  it('eviction rejects a bed that is not occupied during the incoming stay', async () => {
+    await fillAllRooms(d(0), d(2), 'LEAVE');
+    const { data: cands } = await sb.rpc('eviction_candidates', {
+      p_category: 'MFA', p_check_in: d(0), p_check_out: d(2), p_guests: [{ seq: 1, gender: 'M', rank_code: 'FO' }],
+    });
+    const res = await sb.rpc('approve_eviction', {
+      p_incoming: { category: 'MFA', check_in: d(5), check_out: d(6), party_size: 1, guests: [{ seq: 1, gender: 'M', rank_code: 'AVM', relation: 'PRIMARY' }] },
+      p_evict_allocation_ids: [cands[0].allocation_id],
+      p_reason_enc: 'enc:official-duty-reason',
+      p_key_version: 1,
+      p_reason_aad_id: crypto.randomUUID(),
+    });
+    expect(res.error?.message).toContain('ERR_EVICTION_NO_OVERLAP');
+  });
+
+  it('eviction allots the existing pending request in place instead of creating a second booking', async () => {
+    await fillAllRooms(d(0), d(2), 'LEAVE');
+    const pendingId = await requestFor([G('M', 'AVM')], 'MFA');
+    const countBefore = ((await sb.from('bookings').select('*')).data ?? []).length;
+    const { data: cands } = await sb.rpc('eviction_candidates', {
+      p_category: 'MFA', p_check_in: d(0), p_check_out: d(2), p_guests: [{ seq: 1, gender: 'M', rank_code: 'AVM' }],
+    });
+    const ids = cands.filter((c: any) => c.room_id === cands[0].room_id).map((c: any) => c.allocation_id);
+    const { data: newId, error } = await sb.rpc('approve_eviction', {
+      // The payload's category is ignored: the stored request decides who may be displaced.
+      p_incoming: { booking_id: pendingId, category: 'LEAVE', check_in: d(0), check_out: d(2), party_size: 1, guests: [] },
+      p_evict_allocation_ids: ids,
+      p_reason_enc: 'enc:official-duty-reason',
+      p_key_version: 1,
+      p_reason_aad_id: crypto.randomUUID(),
+    });
+    expect(error, error?.message).toBeNull();
+    expect(newId).toBe(pendingId);
+    expect(((await sb.from('bookings').select('*')).data ?? []).length).toBe(countBefore);
+    expect((await sb.from('bookings').select('*').eq('id', pendingId).single()).data.status).toBe('CONFIRMED');
+    expect((await allocationsOf(pendingId)).filter((x) => x.status === 'ACTIVE')).toHaveLength(1);
+  });
+
+  it('denying a pending request cancels it and records the denial', async () => {
+    const id = await requestFor([G('M', 'FO')], 'LEAVE');
+    const res = await sb.rpc('record_denial', {
+      p_category: 'LEAVE', p_check_in: d(0), p_check_out: d(2), p_party_size: 1, p_reason_enc: 'enc', p_key_version: 1,
+      p_id: crypto.randomUUID(), p_booking_id: id,
+    });
+    expect(res.error, res.error?.message).toBeNull();
+    expect((await sb.from('bookings').select('*').eq('id', id).single()).data.status).toBe('CANCELLED');
+    const again = await sb.rpc('record_denial', {
+      p_category: 'LEAVE', p_check_in: d(0), p_check_out: d(2), p_party_size: 1, p_reason_enc: 'enc', p_key_version: 1,
+      p_booking_id: id,
+    });
+    expect(again.error?.message).toContain('ERR_BOOKING_NOT_PENDING');
   });
 });
