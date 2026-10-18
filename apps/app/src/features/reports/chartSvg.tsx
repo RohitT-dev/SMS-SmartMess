@@ -2,7 +2,7 @@ import React from 'react';
 import { View, StyleSheet } from 'react-native';
 import Svg, { Rect, Line, Text as SvgText, G } from 'react-native-svg';
 import { useThemeStore } from '../../state/themeStore';
-import type { ReportDailyRow } from '@sms/core';
+import { dailyBreakdown, type ReportDailyRow } from '@sms/core';
 
 export interface ChartSvgProps {
   data: ReportDailyRow[];
@@ -17,31 +17,11 @@ export const ChartSvg: React.FC<ChartSvgProps> = ({
 }) => {
   const colors = useThemeStore((s) => s.colors);
 
-  // Group data by day and category
-  const daysMap = new Map<
-    string,
-    { mfa: number; pi: number; leave: number; td: number; suite: number; total: number }
-  >();
-
-  for (const row of data) {
-    let dayEntry = daysMap.get(row.day);
-    if (!dayEntry) {
-      dayEntry = { mfa: 0, pi: 0, leave: 0, td: 0, suite: 0, total: 0 };
-      daysMap.set(row.day, dayEntry);
-    }
-    if (row.roomType === 'SUITE') {
-      dayEntry.suite += row.people;
-    } else {
-      if (row.category === 'MFA') dayEntry.mfa += row.people;
-      if (row.category === 'PI') dayEntry.pi += row.people;
-      if (row.category === 'LEAVE') dayEntry.leave += row.people;
-      if (row.category === 'TD') dayEntry.td += row.people;
-      dayEntry.total += row.people;
-    }
-  }
-
-  const days = Array.from(daysMap.keys()).sort();
-  const maxTotal = Math.max(10, ...Array.from(daysMap.values()).map((d) => d.total));
+  // One row per day, split by category (the same aggregation the PDF reports use).
+  const dayRows = dailyBreakdown(data);
+  const daysMap = new Map(dayRows.map((r) => [r.day, r]));
+  const days = dayRows.map((r) => r.day);
+  const maxTotal = Math.max(10, ...dayRows.map((d) => d.total));
 
   const paddingLeft = 40;
   const paddingBottom = 40;

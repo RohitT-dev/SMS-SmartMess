@@ -102,3 +102,46 @@ export function reportInsights(
     writtenInsights
   };
 }
+
+/** One calendar day of the occupancy report, split by visitor category. */
+export interface DailyBreakdownRow {
+  day: string;
+  mfa: number;
+  pi: number;
+  leave: number;
+  td: number;
+  /** VVIP suite guests, accounted separately from general mess inventory. */
+  suite: number;
+  /** Guests in non-suite rooms (mfa + pi + leave + td). */
+  total: number;
+}
+
+/**
+ * Collapses report_daily rows (day x category x room type) into one row per day, sorted by date.
+ * The chart, the daily table and the PDF all use this so their numbers cannot drift apart.
+ */
+export function dailyBreakdown(dailyRows: ReportDailyRow[]): DailyBreakdownRow[] {
+  const byDay = new Map<string, DailyBreakdownRow>();
+  for (const row of dailyRows) {
+    let entry = byDay.get(row.day);
+    if (!entry) {
+      entry = { day: row.day, mfa: 0, pi: 0, leave: 0, td: 0, suite: 0, total: 0 };
+      byDay.set(row.day, entry);
+    }
+    if (row.roomType === 'SUITE') {
+      entry.suite += row.people;
+      continue;
+    }
+    if (row.category === 'MFA') entry.mfa += row.people;
+    else if (row.category === 'PI') entry.pi += row.people;
+    else if (row.category === 'LEAVE') entry.leave += row.people;
+    else if (row.category === 'TD') entry.td += row.people;
+    entry.total += row.people;
+  }
+  return Array.from(byDay.values()).sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+}
+
+/** Whole-percent occupancy of `beds`; 0 when there is no inventory. */
+export function occupancyPercent(people: number, beds: number): number {
+  return beds > 0 ? Math.round((people / beds) * 100) : 0;
+}

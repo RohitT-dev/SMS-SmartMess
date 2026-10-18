@@ -17,7 +17,13 @@ import { supabase } from '../../../src/lib/supabase';
 import { logAction } from '../../../src/lib/activityLog';
 import { addDaysToDateString, isValidDateString, localDateString } from '../../../src/lib/dates';
 import { ChartSvg } from '../../../src/features/reports/chartSvg';
-import { exportReportPdf } from '../../../src/features/reports/pdfGenerator';
+import {
+  previewInsightsReport,
+  previewOccupancyReport,
+} from '../../../src/features/reports/pdfGenerator';
+import { exportPastBookingsPdf } from '../../../src/features/reports/pastBookingsPdfGenerator';
+import { fetchPastBookingItems } from '../../../src/features/reports/reportData';
+import { useRoomNames } from '../../../src/features/rooms/useRoomNames';
 import { reportInsights, type ReportDailyRow } from '@sms/core';
 
 export default function ReportsScreen() {
@@ -113,26 +119,49 @@ export default function ReportsScreen() {
       return (data || []).length * 2;
     },
   });
-  const insights = reportInsights(dailyRows || [], totalBeds);
+  const denialCount = (denials || []).reduce((sum: number, d: { count: number }) => sum + d.count, 0);
+  const insights = reportInsights(dailyRows || [], totalBeds, denialCount);
 
-  const [exporting, setExporting] = useState(false);
+  const { data: roomNames } = useRoomNames();
+  const [exporting, setExporting] = useState<'occupancy' | 'insights' | 'past' | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
-  const handleExport = async () => {
-    setExporting(true);
+  // Printed documents state the actual dates, not just "This Month".
+  const printedPeriod =
+    rangePreset === 'custom' ? periodLabel : `${periodLabel} (${fromDate} to ${toDateInclusive})`;
+
+  const runExport = async (kind: 'occupancy' | 'insights' | 'past') => {
+    if (!rangeValid) return;
+    setExporting(kind);
     setExportError(null);
     try {
-      await exportReportPdf({
-        periodLabel,
-        insights,
-        dailyRows: dailyRows || [],
-        denials: denials || [],
-      });
-      logAction('reports.export_pdf', { meta: { period: periodLabel } });
+      if (kind === 'past') {
+        const bookings = await fetchPastBookingItems({
+          today: localDateString(),
+          from: fromDate,
+          toExclusive: toDate,
+          roomNames,
+        });
+        await exportPastBookingsPdf({
+          title: 'Past Bookings Register',
+          bookings,
+          filterLabel: `Stays in ${printedPeriod}`,
+        });
+      } else {
+        const options = {
+          periodLabel: printedPeriod,
+          insights,
+          dailyRows: dailyRows || [],
+          denials: denials || [],
+        };
+        if (kind === 'occupancy') previewOccupancyReport(options);
+        else previewInsightsReport(options);
+      }
+      logAction('reports.open_preview', { meta: { report: kind, period: periodLabel } });
     } catch (err: any) {
-      setExportError(userErrorMessage(err, 'PDF export failed.'));
+      setExportError(userErrorMessage(err, 'Could not prepare the report.'));
     } finally {
-      setExporting(false);
+      setExporting(null);
     }
   };
 
@@ -142,7 +171,7 @@ export default function ReportsScreen() {
         {/* Navigation to Grid Matrix */}
         <View style={{ marginBottom: spacing.sm, flexDirection: 'row', justifyContent: 'flex-end' }}>
           <Button
-            label="📅 Room Occupancy Grid Matrix (Custom Dates & PDF)"
+            label="Room Occupancy Grid (custom dates & PDF)"
             variant="secondary"
             onPress={() => router.push('/(app)/reports/grid' as any)}
           />
@@ -177,6 +206,38 @@ export default function ReportsScreen() {
           )}
         </Card>
 
+        {/* Export: every report opens the A4 preview, from where it is printed / saved / shared */}
+        <Card style={{ marginTop: spacing.md }}>
+          <Text style={[styles.cardTitle, { color: colors.navy }]}>Export reports (PDF)</Text>
+          <Text style={[styles.chartNotice, { color: colors.muted }]}>
+            Each report opens a preview of the A4 document for the period above, then prints, saves or
+            shares it. Past bookings lists names, full ranks, units and service numbers.
+          </Text>
+          <View style={styles.exportRow}>
+            <Button
+              label="Occupancy report"
+              variant="primary"
+              onPress={() => runExport('occupancy')}
+              loading={exporting === 'occupancy'}
+              disabled={!rangeValid || exporting !== null || isLoading}
+            />
+            <Button
+              label="Insights summary"
+              variant="primary"
+              onPress={() => runExport('insights')}
+              loading={exporting === 'insights'}
+              disabled={!rangeValid || exporting !== null || isLoading}
+            />
+            <Button
+              label="Past bookings register"
+              variant="primary"
+              onPress={() => runExport('past')}
+              loading={exporting === 'past'}
+              disabled={!rangeValid || exporting !== null}
+            />
+          </View>
+        </Card>
+
         {exportError && <Banner type="error" message={exportError} style={{ marginTop: spacing.md }} />}
 
         {/* Headline Numbers Strip */}
@@ -197,12 +258,6 @@ export default function ReportsScreen() {
             <Text style={[styles.cardTitle, { color: colors.navy }]}>
               DATE VS PEOPLE OCCUPANCY (BY CATEGORY)
             </Text>
-            <Button
-              label="Export PDF Report"
-              variant="primary"
-              onPress={handleExport}
-              loading={exporting}
-            />
           </View>
           <Text style={[styles.chartNotice, { color: colors.muted }]}>
             Stacked breakdown: Navy = MFA • Blue = PI • Green = LEAVE • Orange = TD • Saffron =
@@ -277,6 +332,11 @@ const styles = StyleSheet.create({
     fontSize: typography.base,
     fontWeight: typography.weights.bold,
     marginBottom: spacing.sm,
+  },
+  exportRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
   },
   statsStrip: {
     flexDirection: 'row',

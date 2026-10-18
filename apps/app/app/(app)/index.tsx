@@ -16,9 +16,10 @@ import { spacing, typography } from '../../src/ui/tokens';
 import { supabase } from '../../src/lib/supabase';
 import { useRoomNames } from '../../src/features/rooms/useRoomNames';
 import { RoomBedMap } from '../../src/features/rooms/RoomBedMap';
+import { roomAvailability } from '../../src/features/rooms/bedLayout';
 import { Segmented } from '../../src/ui/primitives/Segmented';
 import { addDaysToDateString, localDateString } from '../../src/lib/dates';
-import type { RoomAvailabilityStatus } from '@sms/core';
+import { rankLabel } from '../../src/features/bookings/guestDisplay';
 
 interface TileOccupant {
   category: string;
@@ -26,12 +27,12 @@ interface TileOccupant {
   rankCode: string | null;
 }
 
-/** "LEAVE · M/FO ×2" when both beds hold the same profile, otherwise one entry per guest. */
+/** "LEAVE · M/Flying Officer ×2" when both beds hold the same profile, otherwise one entry per guest. */
 function summarizeOccupants(occupants: TileOccupant[] | undefined): string | undefined {
   if (!occupants?.length) return undefined;
   const counts = new Map<string, number>();
   for (const o of occupants) {
-    const key = `${o.category} · ${o.gender}/${o.rankCode ?? 'Civilian'}`;
+    const key = `${o.category} · ${o.gender}/${o.rankCode ? rankLabel(o.rankCode) : 'Civilian'}`;
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   return [...counts.entries()].map(([k, n]) => (n > 1 ? `${k} ×${n}` : k)).join('\n');
@@ -95,17 +96,11 @@ export default function DashboardScreen() {
       });
       if (error) throw error;
 
-      return (data || []).map((row: any) => {
-        let status: RoomAvailabilityStatus = 'free';
-        if (row.is_closed) status = 'out_of_service';
-        else if (row.beds_taken === 1) status = 'one_bed_free';
-        else if (row.beds_taken === 2) status = 'full';
-
-        return {
-          ...row,
-          status,
-        };
-      });
+      return (data || []).map((row: any) => ({
+        ...row,
+        // A room held by a booking that does not allow sharing is full: it has no bookable bed.
+        status: roomAvailability(row),
+      }));
     },
   });
 

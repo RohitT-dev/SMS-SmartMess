@@ -17,6 +17,7 @@ import { DateRange } from '../../../../src/ui/primitives/DateRange';
 import { Banner } from '../../../../src/ui/primitives/Banner';
 import { Badge } from '../../../../src/ui/primitives/Badge';
 import { Field } from '../../../../src/ui/primitives/Field';
+import { Checkbox } from '../../../../src/ui/primitives/Checkbox';
 import { layout, spacing, typography } from '../../../../src/ui/tokens';
 import { supabase } from '../../../../src/lib/supabase';
 import { logAction } from '../../../../src/lib/activityLog';
@@ -72,6 +73,8 @@ interface SavedRequestConfirmation {
   checkIn: string;
   checkOut: string;
   preferredRoomType: RoomType | null;
+  /** "Allow room sharing" as saved on the request. */
+  allowSharing: boolean;
   nights: number;
   /** People travelling with the primary guest, saved on the same booking. */
   companions: Companion[];
@@ -146,6 +149,10 @@ export default function NewBookingWizardScreen() {
     return 'ANY';
   });
 
+  // "Allow room sharing": off, the booking holds each room for its own party and only fully
+  // vacant rooms are offered; on, rooms with a free bed beside a compatible guest are offered too.
+  const [allowSharing, setAllowSharing] = useState<boolean>(false);
+
   // Guest Details (All optional)
   const [currentRank, setCurrentRank] = useState<RankCode>('WG_CDR');
   const [currentGender, setCurrentGender] = useState<Gender>('M');
@@ -183,6 +190,7 @@ export default function NewBookingWizardScreen() {
     setCurrentIdNumber('');
     setCurrentNotes('');
     setCompanions([]);
+    setAllowSharing(false);
   };
 
   const handleAddCivilian = () => {
@@ -278,6 +286,7 @@ export default function NewBookingWizardScreen() {
             check_out: checkOut,
             party_size: party.length,
             is_suite_booking: false,
+            allow_sharing: allowSharing,
             preferred_room_type: prefType,
             status: 'PENDING_ALLOTMENT',
             // Remarks travel in the encrypted guest record (persistGuestDetails). notes_enc is a
@@ -362,7 +371,7 @@ export default function NewBookingWizardScreen() {
       logAction('bookings.create_request', {
         entity: 'bookings',
         entityId: bookingId as string,
-        meta: { mode: 'wizard_request', category, checkIn, checkOut, andAllotNow, party_size: party.length },
+        meta: { mode: 'wizard_request', category, checkIn, checkOut, andAllotNow, party_size: party.length, allow_sharing: allowSharing },
       });
 
       if (andAllotNow) {
@@ -375,6 +384,7 @@ export default function NewBookingWizardScreen() {
           preferredRoomType: prefType || undefined,
           preferredRoomId: targetRoomId || undefined,
           preferredBedSlot: targetBedSlot ? Number(targetBedSlot) : undefined,
+          allowSharing,
           guests: party.map((p, i) =>
             i === 0
               ? {
@@ -409,6 +419,7 @@ export default function NewBookingWizardScreen() {
         checkIn,
         checkOut,
         preferredRoomType: prefType,
+        allowSharing,
         nights,
         companions,
       });
@@ -429,6 +440,7 @@ export default function NewBookingWizardScreen() {
       preferredRoomType: savedRequest.preferredRoomType || undefined,
       preferredRoomId: targetRoomId || undefined,
       preferredBedSlot: targetBedSlot ? Number(targetBedSlot) : undefined,
+      allowSharing: savedRequest.allowSharing,
       guests: [
         {
           gender: savedRequest.gender,
@@ -530,6 +542,13 @@ export default function NewBookingWizardScreen() {
                   </Text>
                 </View>
               ) : null}
+
+              <View style={styles.detailRow}>
+                <Text style={[styles.detailLabel, { color: colors.muted }]}>Room Sharing</Text>
+                <Text style={[styles.detailValue, { color: colors.text }]}>
+                  {savedRequest.allowSharing ? 'Allowed' : 'Not allowed (whole room held)'}
+                </Text>
+              </View>
 
               {savedRequest.serviceNumber ? (
                 <View style={styles.detailRow}>
@@ -654,6 +673,15 @@ export default function NewBookingWizardScreen() {
               options={ROOM_PREFERENCE_OPTIONS}
             />
           </View>
+
+          <View style={{ marginTop: spacing.sm }}>
+            <Checkbox
+              label="Allow room sharing"
+              hint="Unchecked: only fully vacant rooms are offered and this booking holds each room it uses for its own party. Checked: rooms with a free bed beside a compatible guest (same gender, any rank, and that booking allows sharing) are offered as well."
+              checked={allowSharing}
+              onChange={setAllowSharing}
+            />
+          </View>
         </Card>
 
         {/* Section 2: Guest Details (All Optional) */}
@@ -762,7 +790,7 @@ export default function NewBookingWizardScreen() {
           <Text style={[styles.sectionSubtitle, { color: colors.muted }]}>
             Add family members and other civilians, or further service members. Civilians need no
             rank and may share a room with anyone in this booking, but never with another booking's
-            guests. Ranked guests share only with the same gender and rank. Every person takes one bed.
+            guests. Ranked guests share only with guests of the same gender. Every person takes one bed.
           </Text>
 
           {companions.map((c, idx) => {

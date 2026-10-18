@@ -3,6 +3,8 @@ import { View, Text, Pressable, StyleSheet } from 'react-native';
 import { RELATION_LABELS, type GuestRelation, type RoomDayOccupant } from '@sms/core';
 import { useThemeStore } from '../../state/themeStore';
 import { layout, spacing, typography } from '../../ui/tokens';
+import { isHeldByExclusiveBooking, roomBedLayout, type BedState } from './bedLayout';
+import { rankLabel } from '../bookings/guestDisplay';
 
 /** One room for one day, as daily_room_state returns it. */
 export interface BedMapRoom {
@@ -21,12 +23,6 @@ export interface RoomBedMapProps {
   onOpenRoom: (roomId: string) => void;
 }
 
-type BedState =
-  | { kind: 'free'; sharesWith?: RoomDayOccupant }
-  | { kind: 'held'; by: RoomDayOccupant }
-  | { kind: 'occupied'; occ: RoomDayOccupant }
-  | { kind: 'closed' };
-
 const GROUPS: Array<{ type: string; label: string }> = [
   { type: 'VIP', label: 'VIP rooms' },
   { type: 'SEMI_VIP', label: 'Semi VIP rooms' },
@@ -34,28 +30,15 @@ const GROUPS: Array<{ type: string; label: string }> = [
 ];
 
 function personLabel(o: RoomDayOccupant): string {
-  if (o.rankCode) return o.rankCode.replace('_', ' ');
+  if (o.rankCode) return rankLabel(o.rankCode);
   return RELATION_LABELS[(o.relation as GuestRelation) ?? 'OTHER'] ?? 'Civilian';
-}
-
-function bedStates(room: BedMapRoom): [BedState, BedState] {
-  if (room.is_closed) return [{ kind: 'closed' }, { kind: 'closed' }];
-  const occ = room.occupants ?? [];
-  const at = (slot: 1 | 2) => occ.find((o) => o.bedSlot === slot);
-  return ([1, 2] as const).map((slot): BedState => {
-    const here = at(slot);
-    if (here) return { kind: 'occupied', occ: here };
-    const other = at(slot === 1 ? 2 : 1);
-    if (!other) return { kind: 'free' };
-    // Beside a civilian only their own party may sleep; beside a ranked guest, the same gender and rank.
-    if (!other.rankCode) return { kind: 'held', by: other };
-    return { kind: 'free', sharesWith: other };
-  }) as [BedState, BedState];
 }
 
 /**
  * Floor-plan style map: every room drawn with its two beds, so a clerk sees at a glance which beds
  * are taken and which can still be booked for the selected day. Free beds open New Booking.
+ * A room held by a booking that does not allow sharing is drawn with just that one bed: its other
+ * bed is not free and is not drawn.
  */
 export function RoomBedMap({ rooms, roomNames, onBookBed, onOpenRoom }: RoomBedMapProps) {
   const colors = useThemeStore((s) => s.colors);
@@ -68,7 +51,7 @@ export function RoomBedMap({ rooms, roomNames, onBookBed, onOpenRoom }: RoomBedM
   } as const;
 
   const totals = { free: 0, held: 0, occupied: 0, closed: 0 };
-  for (const r of rooms) for (const b of bedStates(r)) totals[b.kind]++;
+  for (const r of rooms) for (const b of roomBedLayout(r)) totals[b.state.kind]++;
 
   const legend: Array<{ kind: keyof typeof palette; label: string }> = [
     { kind: 'free', label: `Free (${totals.free})` },
@@ -77,7 +60,7 @@ export function RoomBedMap({ rooms, roomNames, onBookBed, onOpenRoom }: RoomBedM
     { kind: 'closed', label: `Out of service (${totals.closed})` },
   ];
 
-  const renderBed = (room: BedMapRoom, slot: 1 | 2, state: BedState, name: string) => {
+  const renderBed = (room: BedMapRoom, slot: 1 | 2, state: BedState, name: string, alone = false) => {
     const p = palette[state.kind];
     let title: string;
     let detail: string;
@@ -86,7 +69,7 @@ export function RoomBedMap({ rooms, roomNames, onBookBed, onOpenRoom }: RoomBedM
       case 'free':
         title = 'Free';
         detail = state.sharesWith
-          ? `Shares with ${state.sharesWith.gender} ${personLabel(state.sharesWith)}`
+          ? `Any ${state.sharesWith.gender === 'F' ? 'female' : 'male'} guest · shares with ${personLabel(state.sharesWith)}`
           : 'Tap to book';
         a11y = `${name} bed ${slot}, free${state.sharesWith ? `, ${detail}` : ''}. Book this bed`;
         break;
@@ -97,7 +80,9 @@ export function RoomBedMap({ rooms, roomNames, onBookBed, onOpenRoom }: RoomBedM
         break;
       case 'occupied':
         title = `${personLabel(state.occ)} · ${state.occ.gender}`;
-        detail = `${state.occ.category} · until ${state.occ.checkOut.slice(5)}`;
+        detail = `${state.occ.category} · until ${state.occ.checkOut.slice(5)}${
+          state.occ.allowSharing === false ? ' · no sharing' : ''
+        }`;
         a11y = `${name} bed ${slot}, occupied by ${state.occ.rankCode ? 'a ranked guest' : 'a civilian guest'}, ${detail}`;
         break;
       case 'closed':
@@ -115,6 +100,8 @@ export function RoomBedMap({ rooms, roomNames, onBookBed, onOpenRoom }: RoomBedM
         accessibilityLabel={a11y}
         style={({ pressed }) => [
           styles.bed,
+          // A room held by one booking shows its single bed at the width of one of two.
+          alone && styles.bedAlone,
           {
             backgroundColor: p.fill,
             borderColor: p.edge,
@@ -167,10 +154,11 @@ export function RoomBedMap({ rooms, roomNames, onBookBed, onOpenRoom }: RoomBedM
             <View style={styles.grid}>
               {list.map((room) => {
                 const name = roomNames?.[room.room_id] ?? '…';
-                const [b1, b2] = bedStates(room);
+                const beds = roomBedLayout(room);
                 const occ = room.occupants ?? [];
                 const oneParty =
                   occ.length === 2 && occ[0].bookingId === occ[1].bookingId;
+                const roomHeld = isHeldByExclusiveBooking(room);
                 return (
                   <View
                     key={room.room_id}
@@ -190,10 +178,14 @@ export function RoomBedMap({ rooms, roomNames, onBookBed, onOpenRoom }: RoomBedM
                           One party
                         </Text>
                       )}
+                      {roomHeld && (
+                        <Text style={[styles.partyChip, { color: colors.navy, borderColor: colors.border }]}>
+                          Whole room held
+                        </Text>
+                      )}
                     </Pressable>
                     <View style={styles.beds}>
-                      {renderBed(room, 1, b1, name)}
-                      {renderBed(room, 2, b2, name)}
+                      {beds.map((b) => renderBed(room, b.slot, b.state, name, roomHeld))}
                     </View>
                   </View>
                 );
@@ -283,6 +275,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.sm,
     paddingBottom: spacing.sm,
     paddingTop: 26,
+  },
+  bedAlone: {
+    flexGrow: 0,
+    flexBasis: '50%',
+    maxWidth: '50%',
   },
   pillow: {
     position: 'absolute',

@@ -114,6 +114,7 @@ export interface Database {
           stay: string;
           party_size: number;
           is_suite_booking: boolean;
+          allow_sharing: boolean;
           notes_enc: string | null;
           key_version: number;
           created_by: string;

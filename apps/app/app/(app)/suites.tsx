@@ -8,6 +8,7 @@ import { Screen } from '../../src/ui/primitives/Screen';
 import { Card } from '../../src/ui/primitives/Card';
 import { Button } from '../../src/ui/primitives/Button';
 import { Select } from '../../src/ui/primitives/Select';
+import { Field } from '../../src/ui/primitives/Field';
 import { DateRange } from '../../src/ui/primitives/DateRange';
 import { Badge } from '../../src/ui/primitives/Badge';
 import { Banner } from '../../src/ui/primitives/Banner';
@@ -41,6 +42,8 @@ export default function SuitesManagementScreen() {
   const datesValid = isValidDateString(checkIn) && isValidDateString(checkOut) && checkOut > checkIn;
   const [vipRank, setVipRank] = useState('AM');
   const [vipGender, setVipGender] = useState('M');
+  const [vipName, setVipName] = useState('');
+  const [vipUnit, setVipUnit] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -95,6 +98,9 @@ export default function SuitesManagementScreen() {
             seq: 1,
             gender: vipGender,
             rank_code: vipRank,
+            // Stored as readable text so the ledger shows who the suite is for.
+            guest_name: vipName.trim() || null,
+            unit: vipUnit.trim() || null,
           },
         ],
         p_allocations: [
@@ -110,6 +116,8 @@ export default function SuitesManagementScreen() {
 
       if (error) throw error;
       setShowBookDialog(false);
+      setVipName('');
+      setVipUnit('');
       queryClient.invalidateQueries({ queryKey: ['admin_suites_list'] });
       queryClient.invalidateQueries({ queryKey: ['daily_room_state'] });
       router.push(`/(app)/bookings/${bookingId}/confirmed` as any);
@@ -228,6 +236,20 @@ export default function SuitesManagementScreen() {
               { label: 'MIAF - Marshal of the IAF', value: 'MIAF' },
               { label: 'AVM - Air Vice Marshal', value: 'AVM' },
             ]}
+          />
+
+          <Field
+            label="Dignitary Name (optional)"
+            value={vipName}
+            onChangeText={setVipName}
+            placeholder="Full name"
+          />
+
+          <Field
+            label="Unit / Appointment (optional)"
+            value={vipUnit}
+            onChangeText={setVipUnit}
+            placeholder="e.g. Air HQ"
           />
 
           <Select

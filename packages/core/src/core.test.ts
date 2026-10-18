@@ -16,6 +16,7 @@ import {
   CreateBookingRequestSchema,
   canShareRoom,
   pairParty,
+  findAlternateWindows,
 } from './index.ts';
 
 import type { BookingPlanRequest, ReportDailyRow, RoomDayState } from './index.ts';
@@ -54,16 +55,17 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
 
   it('A bed that changes hands mid-stay must suit every occupant, not just the last one', () => {
     const day = (n: number) => `2030-01-0${n}`;
-    const occ = (rank: 'FO' | 'WG_CDR', booking: string) => ({
+    const occ = (gender: 'M' | 'F', booking: string) => ({
       allocationId: `${booking}-1`,
       bookingId: booking,
       bedSlot: 1 as const,
-      gender: 'M' as const,
-      rankCode: rank,
+      gender,
+      rankCode: 'WG_CDR' as const,
       category: 'LEAVE' as const,
       bookingStatus: 'CONFIRMED' as const,
       checkIn: day(1),
       checkOut: day(5),
+      allowSharing: true,
     });
     const state = (date: string, o: ReturnType<typeof occ>): RoomDayState => ({
       roomId: 'R1',
@@ -74,18 +76,19 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
       isClosed: false,
       occupants: [o],
     });
-    // Bed 1: WG_CDR on nights 1-2, FO on nights 3-4. Bed 2 is free throughout.
+    // Bed 1: a man on nights 1-2, a woman on nights 3-4. Bed 2 is free throughout.
     const states = [
-      state(day(1), occ('WG_CDR', 'a')),
-      state(day(2), occ('WG_CDR', 'a')),
-      state(day(3), occ('FO', 'b')),
-      state(day(4), occ('FO', 'b')),
+      state(day(1), occ('M', 'a')),
+      state(day(2), occ('M', 'a')),
+      state(day(3), occ('F', 'b')),
+      state(day(4), occ('F', 'b')),
     ];
     const plan = planAllotment(
       {
         category: 'LEAVE',
         checkIn: day(1),
         checkOut: day(5),
+        allowSharing: true,
         guests: [{ gender: 'M', rankCode: 'FO', relation: 'PRIMARY' }],
       } as BookingPlanRequest,
       states,
@@ -300,7 +303,11 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
   it('Error mappings provide user-facing guidance', () => {
     const shareErr = getErrorMessage('Database returned ERR_SHARE_RULE');
     assert.strictEqual(shareErr.code, 'ERR_SHARE_RULE');
-    assert.ok(shareErr.message.includes('same gender and the same rank'));
+    assert.ok(shareErr.message.includes('same gender'));
+    assert.ok(!shareErr.message.includes('same rank'));
+
+    const exclusiveErr = getErrorMessage('ERR_ROOM_EXCLUSIVE');
+    assert.strictEqual(exclusiveErr.code, 'ERR_ROOM_EXCLUSIVE');
 
     const denialErr = getErrorMessage('ERR_CANNOT_DENY_PRIORITY');
     assert.strictEqual(denialErr.code, 'ERR_CANNOT_DENY_PRIORITY');
@@ -377,6 +384,31 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
     assert.strictEqual(canShareRoom(officer, { gender: 'F', rankCode: 'WG_CDR', bookingId: 'b1' }), false);
   });
 
+  it('Sharing rule: ranked people of the same gender may share whatever their ranks', () => {
+    const wgCdr = { gender: 'M' as const, rankCode: 'WG_CDR' as const, bookingId: 'b1' };
+    assert.strictEqual(canShareRoom(wgCdr, { gender: 'M', rankCode: 'FO', bookingId: 'b2' }), true);
+    assert.strictEqual(canShareRoom(wgCdr, { gender: 'M', rankCode: 'AIR_CDRE', bookingId: 'b1' }), true);
+    assert.strictEqual(canShareRoom(wgCdr, { gender: 'F', rankCode: 'WG_CDR', bookingId: 'b2' }), false);
+    assert.strictEqual(canShareRoom(wgCdr, { gender: 'F', rankCode: 'FO', bookingId: 'b2' }), false);
+  });
+
+  it('Sharing rule: a booking that does not allow sharing never shares with another booking', () => {
+    const base = { gender: 'M' as const, rankCode: 'WG_CDR' as const };
+    const exclusive = { ...base, bookingId: 'b1', allowSharing: false };
+    const open = { ...base, bookingId: 'b2', allowSharing: true };
+    assert.strictEqual(canShareRoom(exclusive, open), false);
+    assert.strictEqual(canShareRoom(open, exclusive), false);
+    assert.strictEqual(canShareRoom(open, { ...open, bookingId: 'b3' }), true);
+    // Missing flag = the row predates the option = shareable.
+    assert.strictEqual(canShareRoom(open, { ...base, bookingId: 'b3' }), true);
+    // Its own party always shares with itself.
+    assert.strictEqual(canShareRoom(exclusive, { ...exclusive, rankCode: 'FO' }), true);
+    assert.strictEqual(
+      canShareRoom(exclusive, { gender: 'F', rankCode: null, bookingId: 'b1', allowSharing: false }),
+      true,
+    );
+  });
+
   it('pairParty: primary with spouse, children together', () => {
     const { pairs, singles } = pairParty([
       { gender: 'M', rankCode: 'GP_CAPT', relation: 'PRIMARY' },
@@ -405,7 +437,7 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
     ];
     const plan = planAllotment(
       {
-        category: 'PI', checkIn: day, checkOut: '2026-10-21', preferSharing: true,
+        category: 'PI', checkIn: day, checkOut: '2026-10-21', allowSharing: true, preferSharing: true,
         guests: [
           { gender: 'M', rankCode: 'WG_CDR', relation: 'PRIMARY' },
           { gender: 'F', rankCode: null, relation: 'SPOUSE' },
@@ -443,5 +475,169 @@ describe('packages/core - Domain Logic & Allotment Engine Suite', () => {
     );
     assert.ok(CivilianPiiSchema.safeParse({ name: 'Asha' }).success);
     assert.ok(!CivilianPiiSchema.safeParse({ name: ' ' }).success);
+  });
+
+  describe('Allow room sharing', () => {
+    const DAY = '2026-10-20';
+    const NEXT = '2026-10-21';
+
+    type Occ = { gender: 'M' | 'F'; rankCode: 'WG_CDR' | 'FO' | 'SQN_LDR' | null; bookingId: string; bedSlot?: 1 | 2; allowSharing?: boolean };
+
+    /** One room for the night of DAY. */
+    const room = (roomId: string, order: number, occupants: Occ[] = []): RoomDayState => ({
+      roomId,
+      roomType: 'NORMAL',
+      displayOrder: order,
+      date: DAY,
+      bedsTaken: occupants.length,
+      isClosed: false,
+      occupants: occupants.map((o, i) => ({
+        allocationId: `${roomId}-${i}`,
+        bookingId: o.bookingId,
+        bedSlot: o.bedSlot ?? ((i + 1) as 1 | 2),
+        gender: o.gender,
+        rankCode: o.rankCode,
+        category: 'LEAVE' as const,
+        bookingStatus: 'CONFIRMED' as const,
+        checkIn: DAY,
+        checkOut: NEXT,
+        ...(o.allowSharing === undefined ? {} : { allowSharing: o.allowSharing }),
+      })),
+    });
+
+    const plan = (allowSharing: boolean | undefined, guests: BookingPlanRequest['guests'], states: RoomDayState[]) =>
+      planAllotment({ category: 'LEAVE', checkIn: DAY, checkOut: NEXT, guests, allowSharing }, states);
+
+    const manFo = [{ gender: 'M' as const, rankCode: 'FO' as const, relation: 'PRIMARY' as const }];
+    const roomOf = (res: ReturnType<typeof planAllotment>, guestIndex = 0) => {
+      assert.strictEqual(res.kind, 'ALLOT');
+      return res.kind === 'ALLOT' ? res.assignments.find((a) => a.guestIndex === guestIndex)!.roomId : '';
+    };
+
+    it('unchecked: only fully unoccupied rooms are offered, even when a shareable bed comes first', () => {
+      const states = [
+        room('shared', 1, [{ gender: 'M', rankCode: 'FO', bookingId: 'x', allowSharing: true }]),
+        room('empty', 2),
+      ];
+      assert.strictEqual(roomOf(plan(false, manFo, states)), 'empty');
+      // Nothing is picked by default either.
+      assert.strictEqual(roomOf(plan(undefined, manFo, states)), 'empty');
+    });
+
+    it('unchecked: with no vacant room the request cannot be allotted, however many beds are free', () => {
+      const states = [
+        room('shared', 1, [{ gender: 'M', rankCode: 'FO', bookingId: 'x', allowSharing: true }]),
+        room('full', 2, [
+          { gender: 'F', rankCode: 'FO', bookingId: 'y', allowSharing: true },
+          { gender: 'F', rankCode: 'FO', bookingId: 'y', allowSharing: true },
+        ]),
+      ];
+      assert.notStrictEqual(plan(false, manFo, states).kind, 'ALLOT');
+      assert.strictEqual(plan(true, manFo, states).kind, 'ALLOT');
+    });
+
+    it('checked: empty rooms are used first, a shareable bed once the empty rooms run out', () => {
+      const withEmpty = [
+        room('shared', 1, [{ gender: 'M', rankCode: 'FO', bookingId: 'x', allowSharing: true }]),
+        room('empty', 2),
+      ];
+      assert.strictEqual(roomOf(plan(true, manFo, withEmpty)), 'empty');
+      assert.strictEqual(roomOf(plan(true, manFo, [withEmpty[0]])), 'shared');
+      // preferSharing flips the order: the shared bed is offered before the empty room.
+      const preferShared = planAllotment(
+        { category: 'LEAVE', checkIn: DAY, checkOut: NEXT, guests: manFo, allowSharing: true, preferSharing: true },
+        withEmpty,
+      );
+      assert.strictEqual(roomOf(preferShared), 'shared');
+    });
+
+    it('checked: different ranks of the same gender can share', () => {
+      const states = [room('shared', 1, [{ gender: 'M', rankCode: 'WG_CDR', bookingId: 'x', allowSharing: true }])];
+      const res = plan(true, manFo, states);
+      assert.strictEqual(roomOf(res), 'shared');
+      assert.strictEqual(res.kind === 'ALLOT' && res.assignments[0].bedSlot, 2);
+    });
+
+    it('checked: a different gender cannot share, whatever the rank', () => {
+      const states = [room('shared', 1, [{ gender: 'F', rankCode: 'FO', bookingId: 'x', allowSharing: true }])];
+      assert.notStrictEqual(plan(true, manFo, states).kind, 'ALLOT');
+    });
+
+    it('checked: a civilian occupant is never shared with another booking', () => {
+      const states = [room('shared', 1, [{ gender: 'F', rankCode: null, bookingId: 'x', allowSharing: true }])];
+      assert.notStrictEqual(plan(true, manFo, states).kind, 'ALLOT');
+    });
+
+    it('an exclusive booking blocks the second bed for every other booking', () => {
+      const states = [
+        room('held', 1, [{ gender: 'M', rankCode: 'FO', bookingId: 'x', allowSharing: false }]),
+        room('empty', 2),
+      ];
+      // Even a same-gender request that allows sharing is sent to the empty room.
+      assert.strictEqual(roomOf(plan(true, manFo, states)), 'empty');
+      assert.notStrictEqual(plan(true, manFo, [states[0]]).kind, 'ALLOT');
+    });
+
+    it('a party of two in one exclusive booking still fills its own room', () => {
+      const states = [room('empty', 1)];
+      const pair = [
+        { gender: 'M' as const, rankCode: 'WG_CDR' as const, relation: 'PRIMARY' as const },
+        { gender: 'M' as const, rankCode: 'FO' as const, relation: 'SERVICE' as const },
+      ];
+      const res = plan(false, pair, states);
+      assert.strictEqual(roomOf(res, 0), 'empty');
+      assert.strictEqual(roomOf(res, 1), 'empty');
+    });
+
+    it('occupants from before the option (no flag) count as shareable', () => {
+      const states = [room('legacy', 1, [{ gender: 'M', rankCode: 'FO', bookingId: 'x' }])];
+      assert.strictEqual(roomOf(plan(true, manFo, states)), 'legacy');
+    });
+
+    it('a party shares a vacant room only between guests who may share; otherwise each needs a room', () => {
+      const states = [room('only', 1)];
+      assert.strictEqual(roomOf(plan(true, [...manFo, { gender: 'M', rankCode: 'WG_CDR', relation: 'SERVICE' }], states), 1), 'only');
+      // A man and a woman cannot share, and with a single room neither option can seat both.
+      const mixed = [
+        { gender: 'M' as const, rankCode: 'FO' as const, relation: 'PRIMARY' as const },
+        { gender: 'F' as const, rankCode: 'FO' as const, relation: 'SERVICE' as const },
+      ];
+      assert.notStrictEqual(plan(false, mixed, states).kind, 'ALLOT');
+      assert.notStrictEqual(plan(true, mixed, states).kind, 'ALLOT');
+    });
+
+    it('alternate windows follow the option: unchecked skips windows that only offer a shared bed', () => {
+      const d = (n: number) => `2026-10-${String(20 + n)}`;
+      const states: RoomDayState[] = [];
+      for (let n = 0; n < 4; n++) {
+        states.push({ ...room('r1', 1, [{ gender: 'M', rankCode: 'FO', bookingId: 'x', allowSharing: true }]), date: d(n) });
+      }
+      // Room r2 is occupied for the first two nights only.
+      for (let n = 0; n < 4; n++) {
+        const occupied = n < 2 ? [{ gender: 'F' as const, rankCode: 'FO' as const, bookingId: 'y', allowSharing: true }, { gender: 'F' as const, rankCode: 'FO' as const, bookingId: 'y', allowSharing: true }] : [];
+        states.push({ ...room('r2', 2, occupied), date: d(n) });
+      }
+      const request = { category: 'LEAVE' as const, checkIn: d(0), checkOut: d(1), guests: manFo };
+      const unchecked = findAlternateWindows({ ...request, allowSharing: false }, states, 5, 2);
+      const checked = findAlternateWindows({ ...request, allowSharing: true }, states, 5, 2);
+      // Unchecked needs a wholly empty room: r2 from the 22nd on.
+      assert.deepStrictEqual(unchecked.map((w) => w.checkIn), [d(2)]);
+      // Checked can also sit beside the man in r1 on the 21st.
+      assert.deepStrictEqual(checked.map((w) => w.checkIn), [d(1), d(2)]);
+    });
+
+    it('pairParty: equal ranks pair first, then the same gender whatever the rank', () => {
+      const { pairs, singles } = pairParty([
+        { gender: 'M', rankCode: 'WG_CDR', relation: 'PRIMARY' },
+        { gender: 'M', rankCode: 'FO', relation: 'SERVICE' },
+        { gender: 'M', rankCode: 'WG_CDR', relation: 'SERVICE' },
+        { gender: 'F', rankCode: 'SQN_LDR', relation: 'SERVICE' },
+        { gender: 'M', rankCode: 'SQN_LDR', relation: 'SERVICE' },
+      ]);
+      const idx = pairs.map(([a, b]) => [a.guestIndex, b.guestIndex]);
+      // WG_CDR + WG_CDR (0,2) by equal rank; the leftover FO (1) and SQN_LDR (4) share as men.
+      assert.deepStrictEqual(idx, [[0, 2], [1, 4]]);
+      assert.deepStrictEqual(singles.map((x) => x.guestIndex), [3]);
+    });
   });
 });

@@ -1,3 +1,43 @@
+/**
+ * Past bookings register (landscape A4). Pure HTML builder - no React Native.
+ *
+ * One table row per guest, grouped by booking: the booking columns (ID, category, stay, rooms,
+ * status) sit on the booking's first row and a booking's rows are never split across pages.
+ */
+import { rankLabel } from '../bookings/guestDisplay';
+import {
+  DEFAULT_MESS_NAME,
+  KPI_BLOCK,
+  bodyCapacity,
+  cellLineCount,
+  composeReportHtml,
+  escapeHtml,
+  flowTable,
+  html,
+  kpiStripHtml,
+  pageGeometry,
+  reportFileName,
+  tableHtml,
+  tableRowHeight,
+  type ReportDocument,
+  type SafeHtml,
+  type TableColumn,
+  type TableRow,
+} from './reportDocument';
+
+// Kept here for the modules that already import it from this file.
+export { escapeHtml };
+
+export interface PastBookingGuestItem {
+  name: string;
+  /** Full rank for officers, relation (e.g. "Spouse") for civilian companions. */
+  rank?: string | null;
+  unit?: string | null;
+  serviceNumber?: string | null;
+  /** Rooms this guest occupied, when they differ from the booking's rooms. */
+  rooms?: string;
+}
+
 export interface PastBookingPdfItem {
   id: string;
   category: string;
@@ -11,235 +51,193 @@ export interface PastBookingPdfItem {
   serviceNumber?: string | null;
   unit?: string | null;
   rooms: string;
+  /** Every guest of the booking. When absent, the single guest above is listed. */
+  guests?: PastBookingGuestItem[];
 }
 
 export interface PastBookingsPdfOptions {
   title?: string;
   bookings: PastBookingPdfItem[];
   filterLabel?: string;
+  messName?: string;
+  generatedBy?: string;
+  generatedAt?: Date;
 }
 
-export function escapeHtml(str: string): string {
-  return String(str ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+const DEFAULT_TITLE = 'Past Bookings Register';
+
+export function guestsOf(b: PastBookingPdfItem): PastBookingGuestItem[] {
+  if (b.guests && b.guests.length > 0) return b.guests;
+  return [
+    {
+      name: b.guestName,
+      rank: b.guestRank,
+      unit: b.unit,
+      serviceNumber: b.serviceNumber,
+    },
+  ];
 }
 
-export function buildPastBookingsHtml({
-  title = "OFFICERS' MESS - PAST BOOKINGS REGISTER",
+/** Full rank for rank codes ("FLT_LT"), anything else (already a label or a relation) as given. */
+function rankText(rank: string | null | undefined): string {
+  return rank ? rankLabel(rank) : '';
+}
+
+const STATUS_OK = new Set(['CONFIRMED', 'COMPLETED']);
+
+function columnsFor(innerWidth: number): TableColumn[] {
+  const fixed: Array<[string, number, TableColumn['align']?]> = [
+    ['S.No', 36, 'center'],
+    ['Booking', 68],
+    ['Name', 160],
+    ['Rank / Relation', 118],
+    ['Unit', 122],
+    ['Service No.', 80],
+    ['Category', 60, 'center'],
+    ['Stay period', 140],
+    ['Nights', 42, 'center'],
+    ['Rooms allotted', 0],
+    ['Status', 80, 'center'],
+  ];
+  const used = fixed.reduce((sum, [, w]) => sum + w, 0);
+  return fixed.map(([header, width, align]) => ({
+    header,
+    width: width || innerWidth - used,
+    align,
+  }));
+}
+
+interface BookingGroup {
+  rows: TableRow[];
+  height: number;
+}
+
+function groupFor(b: PastBookingPdfItem, index: number, cols: TableColumn[]): BookingGroup {
+  const guests = guestsOf(b);
+  const stay = `${b.checkIn} to ${b.checkOut}`;
+  const zebra = index % 2 === 1;
+  const rows = guests.map((g, gi): TableRow => {
+    const first = gi === 0;
+    const rooms = g.rooms ?? (first ? b.rooms || '-' : '');
+    const rank = rankText(g.rank);
+    const name = g.name?.trim() || `Guest ${gi + 1}`;
+    const lines = Math.max(
+      cellLineCount([name], cols[2].width, true),
+      cellLineCount([rank], cols[3].width),
+      cellLineCount([g.unit ?? ''], cols[4].width),
+      cellLineCount([g.serviceNumber ?? ''], cols[5].width),
+      first ? cellLineCount([stay], cols[7].width) : 1,
+      cellLineCount([rooms], cols[9].width),
+    );
+    const cells: SafeHtml[] = [
+      html`${first ? index + 1 : ''}`,
+      first ? html`<span class="mono">#${b.id.slice(0, 8)}</span>` : html``,
+      html`<strong>${name}</strong>`,
+      html`${rank}`,
+      html`${g.unit ?? ''}`,
+      html`${g.serviceNumber ?? ''}`,
+      first ? html`<span class="badge badge-${b.category.toLowerCase()}">${b.category}</span>` : html``,
+      html`${first ? stay : ''}`,
+      html`${first ? b.nights : ''}`,
+      html`${rooms}`,
+      first
+        ? html`<span class="badge ${STATUS_OK.has(b.status) ? 'badge-ok' : 'badge-off'}">${b.status}</span>`
+        : html``,
+    ];
+    return { cells, height: tableRowHeight(lines), zebra, className: first ? '' : 'cont' };
+  });
+  return { rows, height: rows.reduce((sum, r) => sum + r.height, 0) };
+}
+
+const EXTRA_CSS = `
+table.data tr.cont td { border-top: 0; }
+`;
+
+export function buildPastBookingsReport({
+  title = DEFAULT_TITLE,
   bookings,
   filterLabel = 'All Completed & Past Stays',
-}: PastBookingsPdfOptions): string {
-  const generatedAt = new Date().toLocaleString('en-IN', {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  });
+  messName = DEFAULT_MESS_NAME,
+  generatedBy,
+  generatedAt = new Date(),
+}: PastBookingsPdfOptions): ReportDocument {
+  const geometry = pageGeometry('landscape');
+  const cols = columnsFor(geometry.innerWidth);
 
   const totalBookings = bookings.length;
   const totalNights = bookings.reduce((sum, b) => sum + (b.nights || 0), 0);
-  const mfaCount = bookings.filter((b) => b.category === 'MFA').length;
-  const piCount = bookings.filter((b) => b.category === 'PI').length;
-  const leaveCount = bookings.filter((b) => b.category === 'LEAVE').length;
-  const tdCount = bookings.filter((b) => b.category === 'TD').length;
+  const totalGuests = bookings.reduce((sum, b) => sum + guestsOf(b).length, 0);
+  const count = (cat: string) => bookings.filter((b) => b.category === cat).length;
+  const kpis = [
+    { label: 'Total Past Stays', value: String(totalBookings) },
+    { label: 'Total Nights Hosted', value: String(totalNights) },
+    { label: 'Guests Hosted', value: String(totalGuests) },
+    { label: 'MFA Stays', value: String(count('MFA')) },
+    { label: 'PI Stays', value: String(count('PI')) },
+    { label: 'Leave Stays', value: String(count('LEAVE')) },
+    { label: 'TD Stays', value: String(count('TD')) },
+  ];
 
-  const rowsHtml = bookings
-    .map(
-      (b, idx) => `
-    <tr>
-      <td style="text-align: center; font-weight: bold;">${idx + 1}</td>
-      <td style="font-family: monospace; font-size: 11px;">#${b.id.slice(0, 8)}</td>
-      <td>
-        <strong>${escapeHtml(b.guestRank)} ${escapeHtml(b.guestName)}</strong>
-        ${b.serviceNumber ? `<div style="font-size: 10px; color: #5B6877;">No: ${escapeHtml(b.serviceNumber)}</div>` : ''}
-        ${b.unit ? `<div style="font-size: 10px; color: #5B6877;">Unit: ${escapeHtml(b.unit)}</div>` : ''}
-      </td>
-      <td style="text-align: center;">
-        <span class="badge badge-${b.category.toLowerCase()}">${b.category}</span>
-      </td>
-      <td>${b.checkIn} to ${b.checkOut}</td>
-      <td style="text-align: center; font-weight: bold;">${b.nights}</td>
-      <td>${escapeHtml(b.rooms || '—')}</td>
-      <td style="text-align: center;">
-        <span class="badge badge-${b.status === 'CONFIRMED' || b.status === 'COMPLETED' ? 'confirmed' : 'cancelled'}">
-          ${b.status}
-        </span>
-      </td>
-    </tr>
-  `,
-    )
-    .join('');
+  const groups = bookings.map((b, i) => groupFor(b, i, cols));
+  const flowed = flowTable(groups, geometry, bodyCapacity(geometry, true) - KPI_BLOCK, false);
 
-  return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>${escapeHtml(title)}</title>
-  <style>
-    @page { size: A4 landscape; margin: 15mm; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      color: #1B2733;
-      line-height: 1.35;
-      margin: 0;
-      padding: 0;
-    }
-    .header {
-      border-bottom: 3px solid #12283F;
-      padding-bottom: 12px;
-      margin-bottom: 16px;
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-end;
-    }
-    .title {
-      font-size: 20px;
-      font-weight: 800;
-      color: #12283F;
-      letter-spacing: 0.5px;
-      margin: 0;
-    }
-    .subtitle {
-      font-size: 12px;
-      color: #5B6877;
-      margin-top: 4px;
-    }
-    .meta {
-      text-align: right;
-      font-size: 11px;
-      color: #5B6877;
-    }
-    .grid {
-      display: flex;
-      gap: 12px;
-      margin-bottom: 16px;
-    }
-    .stat-card {
-      flex: 1;
-      border: 1px solid #DDE2E8;
-      border-radius: 4px;
-      padding: 10px;
-      background: #F4F6F8;
-    }
-    .stat-label {
-      font-size: 10px;
-      font-weight: bold;
-      color: #5B6877;
-      text-transform: uppercase;
-    }
-    .stat-value {
-      font-size: 20px;
-      font-weight: bold;
-      color: #12283F;
-      margin-top: 2px;
-    }
-    .table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 11px;
-    }
-    .table th, .table td {
-      border: 1px solid #DDE2E8;
-      padding: 6px 8px;
-      text-align: left;
-    }
-    .table th {
-      background: #12283F;
-      color: #FFFFFF;
-      font-weight: 600;
-      font-size: 10px;
-      text-transform: uppercase;
-    }
-    .table tr:nth-child(even) {
-      background: #FAFBFD;
-    }
-    .badge {
-      display: inline-block;
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-size: 10px;
-      font-weight: 700;
-    }
-    .badge-mfa { background: #FFEBEE; color: #C62828; border: 1px solid #EF9A9A; }
-    .badge-pi { background: #E3F2FD; color: #1565C0; border: 1px solid #90CAF9; }
-    .badge-leave { background: #FFF3E0; color: #E65100; border: 1px solid #FFCC80; }
-    .badge-td { background: #FFFDE7; color: #F57F17; border: 1px solid #FFF59D; }
-    .badge-confirmed { background: #E8F5E9; color: #2E7D32; border: 1px solid #A5D6A7; }
-    .badge-cancelled { background: #ECEFF1; color: #546E7A; border: 1px solid #CFD8DC; }
-    .footer {
-      margin-top: 20px;
-      padding-top: 8px;
-      border-top: 1px solid #DDE2E8;
-      font-size: 10px;
-      color: #7A8699;
-      text-align: center;
-    }
-  </style>
-</head>
-<body>
-  <div class="header">
-    <div>
-      <div class="title">${escapeHtml(title)}</div>
-      <div class="subtitle">Scope: ${escapeHtml(filterLabel)}</div>
-    </div>
-    <div class="meta">
-      <div><strong>Date Generated:</strong> ${generatedAt}</div>
-      <div><strong>Total Records:</strong> ${totalBookings}</div>
-    </div>
-  </div>
+  const intro = kpiStripHtml(kpis);
+  let rowCursor = 0;
+  const render = (pageGroups: BookingGroup[]): SafeHtml => {
+    const rows = pageGroups.flatMap((g) => g.rows);
+    const out = tableHtml(cols, rows, rowCursor);
+    rowCursor += rows.length;
+    return out;
+  };
 
-  <div class="grid">
-    <div class="stat-card">
-      <div class="stat-label">Total Past Stays</div>
-      <div class="stat-value">${totalBookings}</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Total Nights Hosted</div>
-      <div class="stat-value">${totalNights}</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">MFA Stays</div>
-      <div class="stat-value" style="color: #C62828;">${mfaCount}</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">PI Stays</div>
-      <div class="stat-value" style="color: #1565C0;">${piCount}</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Leave Stays</div>
-      <div class="stat-value" style="color: #E65100;">${leaveCount}</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">TD Stays</div>
-      <div class="stat-value" style="color: #F57F17;">${tdCount}</div>
-    </div>
-  </div>
+  const pages: SafeHtml[] = [];
+  if (bookings.length === 0) {
+    pages.push(html`${intro}<p class="note" style="padding:18px 0;text-align:center">No past bookings found.</p>`);
+  } else {
+    pages.push(flowed.firstPageRows ? html`${intro}${render(flowed.firstPageRows)}` : intro);
+    flowed.laterPages.forEach((pageGroups) => pages.push(render(pageGroups)));
+  }
 
-  <table class="table">
-    <thead>
-      <tr>
-        <th style="width: 35px; text-align: center;">S.No</th>
-        <th style="width: 75px;">Booking ID</th>
-        <th>Guest Details</th>
-        <th style="width: 60px; text-align: center;">Category</th>
-        <th style="width: 140px;">Stay Period</th>
-        <th style="width: 45px; text-align: center;">Nights</th>
-        <th>Rooms Allotted</th>
-        <th style="width: 75px; text-align: center;">Status</th>
-      </tr>
-    </thead>
-    <tbody>
-      ${rowsHtml || '<tr><td colspan="8" style="text-align:center; padding: 20px;">No past bookings found.</td></tr>'}
-    </tbody>
-  </table>
+  const meta = {
+    messName,
+    title,
+    subtitle: `Scope: ${filterLabel}`,
+    details: [
+      { label: 'Scope', value: filterLabel },
+      { label: 'Total records', value: String(totalBookings) },
+    ],
+    generatedAt,
+    generatedBy,
+  };
 
-  <div class="footer">
-    CONFIDENTIAL - OFFICIAL ARMED FORCES MESS PROPERTY - NOT FOR PUBLIC DISSEMINATION
-  </div>
-</body>
-</html>
-  `;
+  return {
+    kind: 'past_bookings',
+    title,
+    fileName: reportFileName(title, generatedAt),
+    orientation: 'landscape',
+    pageCount: pages.length,
+    html: composeReportHtml({
+      meta,
+      orientation: 'landscape',
+      pages,
+      footerNote: 'CONFIDENTIAL - OFFICIAL ARMED FORCES MESS PROPERTY - NOT FOR PUBLIC DISSEMINATION',
+      extraCss: EXTRA_CSS,
+    }),
+    summary: {
+      kpis: kpis.slice(0, 4),
+      lines: bookings
+        .slice(0, 8)
+        .map((b) => `${guestsOf(b)[0].name || 'Guest'} - ${b.checkIn} to ${b.checkOut} (${b.category}, ${b.status})`),
+    },
+    audit: {
+      action: 'past_bookings_exported',
+      entity: 'bookings',
+      meta: { total_records: totalBookings, filter: filterLabel, pages: pages.length },
+    },
+  };
+}
+
+/** Standalone HTML only - see `buildPastBookingsReport` for the full document. */
+export function buildPastBookingsHtml(options: PastBookingsPdfOptions): string {
+  return buildPastBookingsReport(options).html;
 }

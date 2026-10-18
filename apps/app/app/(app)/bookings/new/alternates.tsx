@@ -30,6 +30,8 @@ interface ParsedPayload {
   checkOut: string;
   guests: GuestDemand[];
   preferredRoomType?: RoomType;
+  /** "Allow room sharing" of the request: off, alternate windows need fully vacant rooms. */
+  allowSharing?: boolean;
   preferSharing?: boolean;
 }
 
@@ -44,7 +46,7 @@ export default function BookingAlternatesScreen() {
   } catch {
     parsed = null;
   }
-  const { bookingId, category, checkIn, checkOut, guests, preferredRoomType, preferSharing } = parsed || {
+  const { bookingId, category, checkIn, checkOut, guests, preferredRoomType, preferSharing, allowSharing } = parsed || {
     bookingId: undefined,
     category: 'LEAVE' as Category,
     checkIn: '',
@@ -52,6 +54,7 @@ export default function BookingAlternatesScreen() {
     guests: [] as GuestDemand[],
     preferredRoomType: undefined,
     preferSharing: undefined,
+    allowSharing: undefined,
   };
   const queryClient = useQueryClient();
 
@@ -65,9 +68,12 @@ export default function BookingAlternatesScreen() {
   const windows = useMemo(
     () =>
       horizonStates
-        ? findAlternateWindows({ category, checkIn, checkOut, guests, preferredRoomType, preferSharing }, horizonStates)
+        ? findAlternateWindows(
+            { category, checkIn, checkOut, guests, preferredRoomType, preferSharing, allowSharing },
+            horizonStates,
+          )
         : [],
-    [horizonStates, category, checkIn, checkOut, guests, preferredRoomType, preferSharing],
+    [horizonStates, category, checkIn, checkOut, guests, preferredRoomType, preferSharing, allowSharing],
   );
   const [movingTo, setMovingTo] = useState<string | null>(null);
   const isPriority = category === 'MFA' || category === 'PI';
@@ -122,6 +128,7 @@ export default function BookingAlternatesScreen() {
           category,
           checkIn,
           checkOut,
+          allowSharing,
           guests,
         }),
       },

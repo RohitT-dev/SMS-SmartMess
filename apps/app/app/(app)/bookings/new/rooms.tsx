@@ -9,6 +9,7 @@ import { Button } from '../../../../src/ui/primitives/Button';
 import { Select } from '../../../../src/ui/primitives/Select';
 import { Banner } from '../../../../src/ui/primitives/Banner';
 import { Badge } from '../../../../src/ui/primitives/Badge';
+import { Checkbox } from '../../../../src/ui/primitives/Checkbox';
 import { EmptyState } from '../../../../src/ui/primitives/EmptyState';
 import { spacing, typography } from '../../../../src/ui/tokens';
 import { supabase } from '../../../../src/lib/supabase';
@@ -43,6 +44,8 @@ interface ParsedPayload {
   preferredRoomType?: string;
   preferredRoomId?: string;
   preferredBedSlot?: 1 | 2;
+  /** "Allow room sharing" as saved on the request (the saved booking row wins when it can be read). */
+  allowSharing?: boolean;
   plan?: {
     assignments: Array<{ guestIndex: number; roomId: string; bedSlot: 1 | 2 }>;
   };
@@ -80,7 +83,12 @@ function summarizeOccupancy(states: RoomDayState[] | undefined): Record<string, 
         o.takenBeds.add(Number(occ.bedSlot));
       }
       if (!o.occupants.some((x) => x.bookingId === occ.bookingId && x.gender === occ.gender && x.rankCode === occ.rankCode)) {
-        o.occupants.push({ gender: occ.gender, rankCode: occ.rankCode, bookingId: occ.bookingId });
+        o.occupants.push({
+          gender: occ.gender,
+          rankCode: occ.rankCode,
+          bookingId: occ.bookingId,
+          allowSharing: occ.allowSharing,
+        });
       }
     }
   }
@@ -99,13 +107,36 @@ export default function RoomAllotmentScreen() {
   const checkOut = parsed?.checkOut ?? '';
   const guests = useMemo(() => parsed?.guests ?? [], [parsed]);
   const bookingKey = parsed?.bookingId ?? NEW_BOOKING;
+
+  // "Allow room sharing": the flag saved on the request rules until the clerk flips the checkbox
+  // (only possible while the request is still waiting for a room). Off by default.
+  const { data: savedBooking, isLoading: savedBookingLoading } = useQuery({
+    queryKey: ['booking_sharing_flag', parsed?.bookingId],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('bookings')
+        .select('id, status, allow_sharing')
+        .eq('id', parsed!.bookingId!)
+        .single();
+      if (error) throw error;
+      return data as { id: string; status: string; allow_sharing: boolean };
+    },
+    enabled: Boolean(parsed?.bookingId),
+  });
+  const [sharingOverride, setSharingOverride] = useState<boolean | null>(null);
+  const savedAllowSharing: boolean | undefined = savedBooking?.allow_sharing ?? parsed?.allowSharing;
+  const allowSharing = sharingOverride ?? savedAllowSharing ?? false;
+  // A request opened without the flag in its payload (e.g. from the queue) waits for the saved row.
+  const sharingPending = Boolean(parsed?.bookingId) && savedAllowSharing === undefined && savedBookingLoading;
+
   const personOf = useCallback(
     (idx: number): SharingPerson => ({
       gender: guests[idx].gender,
       rankCode: guests[idx].rankCode,
       bookingId: bookingKey,
+      allowSharing,
     }),
-    [guests, bookingKey],
+    [guests, bookingKey, allowSharing],
   );
   const guestWithDetails = (idx: number): RoomGuest => guests[idx] ?? guests[0];
 
@@ -177,6 +208,9 @@ export default function RoomAllotmentScreen() {
         const occ = occupancy[r.id];
         if (occ?.closed) continue;
 
+        // Without room sharing this booking holds its rooms: only fully vacant ones are offered.
+        if (!allowSharing && occ && (occ.takenBeds.size > 0 || occ.occupants.length > 0)) continue;
+
         // Which beds in room r are taken by OTHER guests in this session?
         const sessionTakenBeds = new Set<number>();
         guests.forEach((_, j) => {
@@ -189,7 +223,9 @@ export default function RoomAllotmentScreen() {
         // STRICT: Rooms with 0 free beds are completely excluded from the dropdown!
         if (freeBeds.length === 0) continue;
 
-        // Sharing rule with guests already staying there (see canShareRoom)
+        // Sharing rule with guests already staying there (see canShareRoom): same gender for ranked
+        // guests whatever the rank, civilians only within their own booking, and the booking
+        // staying there must allow sharing too.
         if (occ && occ.occupants.some((o) => !canShareRoom(personOf(guestIdx), o))) continue;
 
         // Sharing rule with the rest of this party placed in the same room
@@ -202,14 +238,14 @@ export default function RoomAllotmentScreen() {
       }
       return result;
     },
-    [filteredRooms, guests, assignments, occupancy, states, personOf]
+    [filteredRooms, guests, assignments, occupancy, states, personOf, allowSharing]
   );
 
   // Auto-select a valid room AND bed for every guest once live vacancy has loaded. Guests are
   // handled one after another against the choices already made in this pass, so two guests are
   // never given the same bed.
   useEffect(() => {
-    if (!states || !rooms || statesLoading) return;
+    if (!states || !rooms || statesLoading || sharingPending) return;
 
     const next: Record<number, Assignment> = { ...assignments };
     let changed = false;
@@ -246,7 +282,7 @@ export default function RoomAllotmentScreen() {
     });
 
     if (changed) setAssignments(next);
-  }, [states, rooms, statesLoading, getAvailableRoomsForGuest, guests, assignments, parsed]);
+  }, [states, rooms, statesLoading, sharingPending, getAvailableRoomsForGuest, guests, assignments, parsed]);
 
   /** Guests for whom no room in the current filter can take them. */
   const guestsWithoutRoom = useMemo(
@@ -265,6 +301,7 @@ export default function RoomAllotmentScreen() {
           checkIn,
           checkOut,
           preferredRoomType: parsed.preferredRoomType,
+          allowSharing,
           guests: guests.map((g) => ({ gender: g.gender, rankCode: g.rankCode, relation: g.relation })),
         }),
       },
@@ -292,6 +329,9 @@ export default function RoomAllotmentScreen() {
       const name = roomName(roomId);
       const occ = occupancy[roomId];
       if (occ?.closed) errors.push(`${name} is out of service during these dates.`);
+      if (!allowSharing && occ && (occ.takenBeds.size > 0 || occ.occupants.length > 0)) {
+        errors.push(`${name} is not vacant, and this booking does not allow room sharing. Pick a fully vacant room or tick "Allow room sharing".`);
+      }
 
       const slots = list.map((l) => l.bedSlot);
       if (new Set(slots).size !== slots.length) {
@@ -307,19 +347,20 @@ export default function RoomAllotmentScreen() {
 
       const party = list.map((l) => personOf(l.idx));
       if (party.some((p, i) => party.slice(i + 1).some((q) => !canShareRoom(p, q)))) {
-        errors.push(`${name}: ranked guests sharing a room must have the same gender and rank.`);
+        errors.push(`${name}: ranked guests sharing a room must be of the same gender.`);
       }
       if ((occ?.occupants ?? []).some((o) => party.some((p) => !canShareRoom(p, o)))) {
         errors.push(
-          `${name}: cannot share with the guest already staying there (ranked guests need the same gender and rank; civilians share only within their own booking).`,
+          `${name}: cannot share with the guest already staying there (ranked guests need the same gender, civilians share only within their own booking, and both bookings must allow room sharing).`,
         );
       }
     }
     return Array.from(new Set(errors));
-  }, [assignments, guests, occupancy, personOf, roomName, states, statesLoading]);
+  }, [allowSharing, assignments, guests, occupancy, personOf, roomName, states, statesLoading]);
 
   const isValid =
     !statesLoading &&
+    !sharingPending &&
     validationErrors.length === 0 &&
     guests.length > 0 &&
     guests.every((_, idx) => Boolean(assignments[idx]?.roomId));
@@ -341,6 +382,18 @@ export default function RoomAllotmentScreen() {
       let allottedSuccessfully = false;
 
       if (parsed.bookingId) {
+        // The clerk flipped "Allow room sharing" while the request was pending: save it first, so
+        // the server checks the allotment against the same option the screen offered rooms for.
+        if (sharingOverride !== null && sharingOverride !== savedAllowSharing) {
+          const { error: flagError } = await supabase.rpc('set_booking_allow_sharing', {
+            p_booking_id: parsed.bookingId,
+            p_allow: sharingOverride,
+          });
+          if (flagError) throw flagError;
+          queryClient.invalidateQueries({ queryKey: ['booking_sharing_flag', parsed.bookingId] });
+          queryClient.invalidateQueries({ queryKey: ['booking_record', parsed.bookingId] });
+        }
+
         // The request already exists: allot it in place. Never create a second booking here,
         // otherwise a request allotted meanwhile by someone else would be booked twice.
         const { error } = await supabase.rpc('allot_booking_rooms', {
@@ -354,7 +407,7 @@ export default function RoomAllotmentScreen() {
         logAction('bookings.allot', {
           entity: 'bookings',
           entityId: parsed.bookingId,
-          meta: { mode: 'manual', party_size: guests.length },
+          meta: { mode: 'manual', party_size: guests.length, allow_sharing: allowSharing },
         });
       } else {
         const { data: bookingId, error } = await supabase.rpc('create_booking', {
@@ -364,6 +417,7 @@ export default function RoomAllotmentScreen() {
             check_out: checkOut,
             party_size: guests.length,
             is_suite_booking: false,
+            allow_sharing: allowSharing,
             preferred_room_type: roomTypeFilter === 'ALL' ? null : roomTypeFilter,
           },
           p_guests: guestRowsPayload(guests),
@@ -470,7 +524,21 @@ export default function RoomAllotmentScreen() {
             />
           </View>
 
-          {statesLoading || roomsLoading ? (
+          <View style={{ marginTop: spacing.sm }}>
+            <Checkbox
+              label="Allow room sharing"
+              hint={
+                allowSharing
+                  ? 'Fully vacant rooms and rooms with a free bed beside a compatible guest are listed (same gender, any rank; the other booking must allow sharing).'
+                  : 'Only fully vacant rooms are listed. This booking holds each room it uses; nobody else can be placed in the other bed.'
+              }
+              checked={allowSharing}
+              onChange={setSharingOverride}
+              disabled={submitting || sharingPending}
+            />
+          </View>
+
+          {statesLoading || roomsLoading || sharingPending ? (
             <View style={styles.loadingRow}>
               <ActivityIndicator size="small" color={colors.navy} />
               <Text style={[styles.loadingText, { color: colors.muted }]}>

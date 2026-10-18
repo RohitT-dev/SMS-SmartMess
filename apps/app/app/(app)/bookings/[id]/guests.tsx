@@ -20,6 +20,8 @@ import {
 } from '../../../../src/features/crypto-session/cryptoSession';
 import { CivilianPiiSchema, GuestPiiSchema, type GuestPii } from '@sms/core';
 import { describeGuest } from '../../../../src/features/bookings/party';
+import { guestHasName, guestName } from '../../../../src/features/bookings/guestDisplay';
+import { savePlainGuestDetails } from '../../../../src/features/bookings/plainGuestDetails';
 
 export default function GuestDetailsBackfillScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -97,6 +99,18 @@ export default function GuestDetailsBackfillScreen() {
 
     try {
       const pii = parsed.data;
+
+      // Name, unit, service number and phone are stored as readable text (what every screen shows
+      // and search matches). Saved first: if it fails nothing else is written and the error is shown.
+      // The form replaces the whole record, so a blank field clears the stored value.
+      const plain = await savePlainGuestDetails(supabase, currentGuest.id, {
+        name: pii.name,
+        unit: pii.unit ?? '',
+        serviceNumber: pii.serviceNumber ?? '',
+        phone: pii.phone ?? '',
+      });
+      if (!plain.ok) throw new Error(plain.message);
+
       const cipherEnc = encryptGuestPii(currentGuest.id, pii);
       const blindIndex = pii.idNumber
         ? computeIdBlindIndex(pii.idNumber)
@@ -110,30 +124,6 @@ export default function GuestDetailsBackfillScreen() {
       });
 
       if (error) throw error;
-
-      // Also update plain text columns on booking_guests if available
-      try {
-        await supabase.rpc('set_booking_guest_details', {
-          p_guest_id: currentGuest.id,
-          p_guest_name: pii.name,
-          p_unit: pii.unit || null,
-          p_service_number: pii.serviceNumber || null,
-          p_phone: pii.phone || null,
-        });
-      } catch {}
-
-      try {
-        await supabase
-          .from('booking_guests')
-          .update({
-            guest_name: pii.name,
-            unit: pii.unit || null,
-            service_number: pii.serviceNumber || null,
-            phone: pii.phone || null,
-            details: 'COMPLETE',
-          })
-          .eq('id', currentGuest.id);
-      } catch {}
 
       logAction('guests.details_saved', {
         entity: 'booking_guests',
@@ -156,7 +146,7 @@ export default function GuestDetailsBackfillScreen() {
         router.replace(`/(app)/bookings/${id}` as any);
       }
     } catch (err: unknown) {
-      setErrorMsg(userErrorMessage(err, 'Failed to save encrypted guest details'));
+      setErrorMsg(userErrorMessage(err, 'Failed to save guest details'));
     } finally {
       setSubmitting(false);
     }
@@ -174,14 +164,18 @@ export default function GuestDetailsBackfillScreen() {
           </View>
 
           <Text style={[styles.securityNotice, { color: colors.muted }]}>
-            All fields below are encrypted client-side on this device before upload. The Supabase
-            database and hosting staff only store ciphertext.
+            Name, unit, service number and phone are saved as readable text so they show and can be
+            searched everywhere. The ID number and notes are encrypted on this device before upload;
+            the database and hosting staff only store ciphertext for them.
           </Text>
 
           {currentGuest && (
             <View style={styles.formSection}>
               <View style={[styles.badgeStrip, { backgroundColor: colors.bg }]}>
                 <Text style={[styles.badgeStripText, { color: colors.text }]}>
+                  {guestHasName(currentGuest) ? (
+                    <Text style={{ fontWeight: 'bold', color: colors.navy }}>{guestName(currentGuest)} • </Text>
+                  ) : null}
                   Guest ID: <Text style={{ fontWeight: 'bold', color: colors.blue }}>{currentGuest.guest_code || 'GST-…'}</Text> •
                   <Text style={{ fontWeight: 'bold' }}>{describeGuest(currentGuest)}</Text> •
                   Status: <Text style={{ fontWeight: 'bold' }}>{currentGuest.details}</Text>

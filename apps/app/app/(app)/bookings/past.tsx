@@ -21,11 +21,20 @@ import { layout, spacing, typography } from '../../../src/ui/tokens';
 import { supabase } from '../../../src/lib/supabase';
 import { localDateString } from '../../../src/lib/dates';
 import { useRoomNames } from '../../../src/features/rooms/useRoomNames';
-import { decryptGuestPii } from '../../../src/features/crypto-session/cryptoSession';
+import {
+  guestName,
+  guestPhone,
+  guestRankOrRelation,
+  guestServiceNumber,
+  guestUnit,
+} from '../../../src/features/bookings/guestDisplay';
+import { filterBookings } from '../../../src/features/bookings/searchBookings';
+import { humanizeStatus } from '../../../src/lib/labels';
 import {
   exportPastBookingsPdf,
   type PastBookingPdfItem,
 } from '../../../src/features/reports/pastBookingsPdfGenerator';
+import type { PastBookingGuestItem } from '../../../src/features/reports/pastBookingsHtml';
 import type { Category } from '@sms/core';
 
 interface RawBookingRow {
@@ -40,12 +49,13 @@ interface RawBookingRow {
     id: string;
     seq: number;
     gender: string;
-    rank_code: string;
+    rank_code: string | null;
+    relation?: string | null;
     guest_code?: string;
-    guest_name?: string;
-    unit?: string;
-    service_number?: string;
-    phone?: string;
+    guest_name?: string | null;
+    unit?: string | null;
+    service_number?: string | null;
+    phone?: string | null;
   }>;
   allocations?: Array<{
     id: string;
@@ -54,6 +64,18 @@ interface RawBookingRow {
     status: string;
   }>;
 }
+
+/** One person on a past booking: full rank (or relation), plain unit, service number, phone. */
+interface PastGuestLine extends PastBookingGuestItem {
+  name: string;
+  rank: string;
+  unit: string;
+  serviceNumber: string;
+  phone: string;
+}
+
+/** A register row: the PDF row, with every guest of the party present. */
+type PastBookingItem = Omit<PastBookingPdfItem, 'guests'> & { guests: PastGuestLine[] };
 
 export default function PastBookingsScreen() {
   const router = useRouter();
@@ -81,46 +103,19 @@ export default function PastBookingsScreen() {
     },
   });
 
-  // Query guest PII records to resolve guest names if decrypted session is unlocked
-  const { data: piiRows } = useQuery({
-    queryKey: ['guest_pii_for_past_bookings'],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('guest_pii').select('guest_id, pii_enc');
-      if (error) return [];
-      return data || [];
-    },
-  });
-
-  const piiMap = useMemo(() => {
-    const map = new Map<string, { name: string; serviceNumber?: string | null; unit?: string | null }>();
-    if (!piiRows) return map;
-    for (const p of piiRows) {
-      if (p.pii_enc) {
-        try {
-          const dec = decryptGuestPii(p.guest_id, p.pii_enc);
-          map.set(p.guest_id, {
-            name: dec.name,
-            serviceNumber: dec.serviceNumber,
-            unit: dec.unit,
-          });
-        } catch {
-          // session may be locked or permission not granted
-        }
-      }
-    }
-    return map;
-  }, [piiRows]);
-
-  // Transform raw bookings into rich display items
-  const items: PastBookingPdfItem[] = useMemo(() => {
+  // Every row, with the first guest's name, full rank and unit for the register and the PDF.
+  const items: PastBookingItem[] = useMemo(() => {
     if (!rawBookings) return [];
     return rawBookings.map((b) => {
-      const firstGuest = b.booking_guests?.find((g) => g.seq === 1) || b.booking_guests?.[0];
-      const pii = firstGuest ? piiMap.get(firstGuest.id) : undefined;
-
-      const guestRank = firstGuest?.rank_code || 'OFFR';
-      const guestCode = firstGuest?.guest_code || '';
-      const guestName = firstGuest?.guest_name || pii?.name || (guestCode ? `Guest (${guestCode})` : 'Guest');
+      const ordered = [...(b.booking_guests ?? [])].sort((x, y) => x.seq - y.seq);
+      const guests: PastGuestLine[] = ordered.map((g, i) => ({
+        name: guestName(g, null, i),
+        rank: guestRankOrRelation(g),
+        unit: guestUnit(g),
+        serviceNumber: guestServiceNumber(g),
+        phone: guestPhone(g),
+      }));
+      const first = guests[0];
 
       // Calculate stay duration
       const nights = Math.max(
@@ -145,40 +140,41 @@ export default function PastBookingsScreen() {
         nights,
         partySize: b.party_size,
         status: b.status,
-        guestName,
-        guestRank,
-        serviceNumber: firstGuest?.service_number || pii?.serviceNumber,
-        unit: firstGuest?.unit || pii?.unit,
+        guestName: first?.name ?? 'Guest',
+        guestRank: first?.rank ?? '',
+        serviceNumber: first?.serviceNumber || null,
+        unit: first?.unit || null,
         rooms: uniqueRooms || 'None',
+        guests,
       };
     });
-  }, [rawBookings, piiMap, roomNames]);
+  }, [rawBookings, roomNames]);
 
-  // Filter items
+  // Search: name, full rank, unit, service number, phone, guest ID, booking ID, category, status,
+  // dates (2026-10-18, 18/10/2026, 18 Oct), party size and room names, across the whole party.
   const filteredItems = useMemo(() => {
-    const q = searchQuery.trim().toLowerCase();
-    return items.filter((item) => {
-      if (categoryFilter !== 'ALL' && item.category !== categoryFilter) return false;
-      if (!q) return true;
-      return (
-        item.id.toLowerCase().includes(q) ||
-        item.guestName.toLowerCase().includes(q) ||
-        item.guestRank.toLowerCase().includes(q) ||
-        (item.serviceNumber && item.serviceNumber.toLowerCase().includes(q)) ||
-        (item.unit && item.unit.toLowerCase().includes(q)) ||
-        item.rooms.toLowerCase().includes(q)
-      );
-    });
-  }, [items, searchQuery, categoryFilter]);
+    if (!rawBookings) return [];
+    const hits = new Set(
+      filterBookings(
+        rawBookings,
+        { text: searchQuery, category: categoryFilter },
+        { roomNames, allocationStatuses: ['ACTIVE', 'RELEASED'] },
+      ).map((b) => b.id),
+    );
+    return items.filter((item) => hits.has(item.id));
+  }, [rawBookings, items, searchQuery, categoryFilter, roomNames]);
 
   const handleExportPdf = async () => {
     if (exporting || filteredItems.length === 0) return;
     setExporting(true);
     try {
+      // Opens the A4 register on the preview screen (print / save / share from there). The search
+      // text itself is not printed or logged - it can be a name - only that a search was applied.
+      const scope = categoryFilter === 'ALL' ? 'All Past Stays' : `${categoryFilter} Category Stays`;
       await exportPastBookingsPdf({
-        title: "OFFICERS' MESS - PAST BOOKINGS REGISTER",
+        title: 'Past Bookings Register',
         bookings: filteredItems,
-        filterLabel: categoryFilter === 'ALL' ? 'All Past Stays' : `${categoryFilter} Category Stays`,
+        filterLabel: searchQuery.trim() ? `${scope} (search filter applied)` : scope,
       });
     } catch (err) {
       console.error('Failed to export past bookings PDF', err);
@@ -232,7 +228,7 @@ export default function PastBookingsScreen() {
               <TextInput
                 value={searchQuery}
                 onChangeText={setSearchQuery}
-                placeholder="Search name, rank, service no, room..."
+                placeholder="Name, rank, unit, service no, phone, room, date..."
                 placeholderTextColor={colors.muted}
                 style={[
                   styles.searchInput,
@@ -298,7 +294,7 @@ export default function PastBookingsScreen() {
                     </Text>
                     <Badge label={item.category} variant={item.category === 'MFA' ? 'navy' : 'neutral'} />
                     <Badge
-                      label={item.status}
+                      label={humanizeStatus(item.status)}
                       variant={item.status === 'CONFIRMED' || item.status === 'COMPLETED' ? 'green' : 'neutral'}
                     />
                   </View>
@@ -308,16 +304,21 @@ export default function PastBookingsScreen() {
                 </View>
 
                 <View style={styles.cardBody}>
-                  <Text style={[styles.guestName, { color: colors.text }]}>
-                    {item.guestRank} {item.guestName}
-                  </Text>
-                  {item.serviceNumber || item.unit ? (
-                    <Text style={[styles.guestMeta, { color: colors.muted }]}>
-                      {[item.serviceNumber && `No: ${item.serviceNumber}`, item.unit && `Unit: ${item.unit}`]
-                        .filter(Boolean)
-                        .join(' · ')}
-                    </Text>
-                  ) : null}
+                  {item.guests.map((g, i) => (
+                    <View key={i} style={i > 0 ? { marginTop: spacing.xs } : undefined}>
+                      <Text style={[styles.guestName, { color: colors.text }]}>
+                        {g.name}
+                        {g.rank ? <Text style={{ fontWeight: '600', color: colors.muted }}> · {g.rank}</Text> : null}
+                      </Text>
+                      {g.unit || g.serviceNumber || g.phone ? (
+                        <Text style={[styles.guestMeta, { color: colors.muted }]}>
+                          {[g.unit && `Unit: ${g.unit}`, g.serviceNumber && `No: ${g.serviceNumber}`, g.phone && `Ph: ${g.phone}`]
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </Text>
+                      ) : null}
+                    </View>
+                  ))}
 
                   <View style={styles.detailsRow}>
                     <View style={styles.detailCol}>

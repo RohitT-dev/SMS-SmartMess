@@ -69,7 +69,7 @@ Room inventory.
 - `room_closures`: `id`, `room_id`, `period daterange`, `reason_enc`, `created_by`.
 
 ### `bookings` & `booking_guests` & `guest_pii`
-- `bookings`: `id`, `category ('MFA' | 'PI' | 'LEAVE' | 'TD')`, `status ('CONFIRMED' | 'CANCELLED' | 'DISPLACED' | 'COMPLETED')`, `check_in date`, `check_out date`, `stay daterange GENERATED ALWAYS AS (daterange(check_in, check_out, '[)')) STORED`, `party_size int (1..40)`, `is_suite_booking bool`.
+- `bookings`: `id`, `category ('MFA' | 'PI' | 'LEAVE' | 'TD')`, `status ('CONFIRMED' | 'CANCELLED' | 'DISPLACED' | 'COMPLETED')`, `check_in date`, `check_out date`, `stay daterange GENERATED ALWAYS AS (daterange(check_in, check_out, '[)')) STORED`, `party_size int (1..40)`, `is_suite_booking bool`, `allow_sharing bool NOT NULL` ("Allow room sharing": `true` accepts other bookings beside it; `false` holds every room it uses for its own party. Existing rows are `true`; new rows default to `false`).
 - `booking_guests`: `id`, `booking_id`, `seq int`, `gender ('M' | 'F')`, `rank_code`, `details ('PENDING' | 'COMPLETE')`.
 - `guest_pii`: `guest_id PRIMARY KEY`, `pii_enc text` (encrypted `{ name, idNumber, phone, serviceNumber, unit, notes }`), `id_blind_index text` (`HMAC-SHA256(blindKey, normalize(idNumber))`). **Direct SELECT revoked from all roles; accessible only via `get_guest_pii` RPC with logged audit trail.**
 
@@ -92,7 +92,8 @@ Physical bed assignments.
 3. **Sharing Rule Trigger (`trg_check_sharing_rule`)**:
    - Acquires row lock `FOR UPDATE` on `rooms`.
    - Inspects any other active allocation in the room with overlapping `stay`.
-   - Enforces identical `gender` AND `rank_code`. Raises `ERR_SHARE_RULE` upon mismatch.
+   - Room exclusivity: a booking with `allow_sharing = false` cannot be placed in a room where a *different* booking has an overlapping active allocation, and no other booking can be placed beside an overlapping allocation of such a booking. Raises `ERR_ROOM_EXCLUSIVE`.
+   - Otherwise two ranked people share when they are of the same `gender` (their `rank_code`s may differ); a civilian shares only within their own booking. Raises `ERR_SHARE_RULE` upon mismatch.
 4. **Suite Isolation Trigger (`trg_check_suite_allocation`)**:
    - Blocks Suite allocations for non-admin callers or bookings without `is_suite_booking = true`. Raises `ERR_SUITE_ONLY_ADMIN`.
 5. **Closure Enforcement Trigger (`trg_check_room_closures`)**:
@@ -106,9 +107,10 @@ Physical bed assignments.
 
 | RPC Name | Access Control | Description |
 |---|---|---|
-| `create_booking` | `create_booking` | Transactional booking, guests, and allocations allotment. Every guest must get exactly one bed (`ERR_INCOMPLETE_ALLOTMENT`); a pending request cannot carry beds. |
+| `create_booking` | `create_booking` | Transactional booking, guests, and allocations allotment. Every guest must get exactly one bed (`ERR_INCOMPLETE_ALLOTMENT`); a pending request cannot carry beds. `p_booking.allow_sharing` (default `false`) sets the booking's room-sharing option; `create_booking_request` and `approve_eviction` carry it. |
 | `allot_booking_rooms` | `create_booking` | All-or-nothing allotment of a pending request (or a confirmed booking with no active bed). |
 | `cancel_booking` | `cancel_booking` | Releases active allocations, sets status to `CANCELLED`. Only `CONFIRMED` / `PENDING_ALLOTMENT` bookings (`ERR_BOOKING_NOT_ACTIVE`). |
+| `set_booking_allow_sharing` | `create_booking` | Changes `allow_sharing` while a request still holds no bed (`PENDING_ALLOTMENT`, or `CONFIRMED` with no active allocation). |
 | `move_allocation` | `create_booking` | Reassigns bed or room with trigger validation. |
 | `get_guest_pii` | `reveal_guest_pii` | Audits "guest PII revealed", returns ciphertext blob. |
 | `set_guest_pii` | `enter_guest_details` | Stores encrypted PII & blind index; sets details `COMPLETE`. |
@@ -117,5 +119,5 @@ Physical bed assignments.
 | `record_denial` | `deny_request` | Records denial reason and, with `p_booking_id`, cancels the pending request. Blocks `MFA`/`PI` with `ERR_CANNOT_DENY_PRIORITY`. |
 | `mess_today` | internal | "Today" in the mess time zone (`app_config.mess_timezone`, default `Asia/Kolkata`); used for backdating and stay-started rules instead of the UTC `CURRENT_DATE`. |
 | `verify_audit_chain` | `admin` | Cryptographically verifies the unbroken SHA-256 chain. |
-| `daily_room_state` | `is_active_user` | Aggregates room and bed state by date. Filters suites for non-admins. |
+| `daily_room_state` | `is_active_user` | Aggregates room and bed state by date. Each occupant carries `guestCode`, `relation` and `allowSharing`, so a room held by a non-sharing booking shows one bed and no free second bed. Filters suites for non-admins. |
 | `dashboard_counts` | `is_active_user` | Live counts of free rooms, partial occupancy, and pending actions. |
