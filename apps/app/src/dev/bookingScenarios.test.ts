@@ -1502,8 +1502,21 @@ describe('roles and suites', () => {
       expect(updatedGuest.phone).toBe(officerPhone);
       expect(updatedGuest.details).toBe('COMPLETE');
 
+      // 0031: every details write is audited (ids only); fill-only mode and the batch are admin-only.
+      const fillAsClerk = await sb.rpc('set_booking_guest_details', {
+        p_guest_id: guestId, p_guest_name: 'x', p_unit: null, p_service_number: null, p_phone: null, p_fill_only: true,
+      });
+      expect(fillAsClerk.error?.message).toContain('ERR_PERMISSION');
+      const batchAsClerk = await sb.rpc('set_booking_guest_details_batch', { p_rows: [{ guest_id: guestId, guest_name: 'x' }] });
+      expect(batchAsClerk.error?.message).toContain('ERR_PERMISSION');
+
       // Matching personal details through the RPC needs reveal_guest_pii (0027/0030); admins pass.
       await signInAs('admin');
+      const clerkAudit = ((await sb.from('audit_log').select('*')).data ?? []).filter(
+        (r: any) => r.action === 'guest_details_set' && r.entity_id === guestId,
+      );
+      expect(clerkAudit.length).toBeGreaterThan(0);
+      expect(JSON.stringify(clerkAudit)).not.toContain(officerName);
       // 6. Universal search matches by name
       const searchByName = await sb.rpc('search_bookings_and_guests', { p_query: 'Vikram' });
       expect(searchByName.data?.map((r: any) => r.booking_id)).toContain(bookingId);

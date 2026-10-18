@@ -677,14 +677,16 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
     },
 
     set_booking_guest_details: (a) => {
+      // Fill-only mode backs the admin backfill (0031).
+      if (a.p_fill_only) need(isAdmin());
       applyGuestDetails(a.p_guest_id, a, !!a.p_fill_only);
-      if (!a.p_fill_only) audit('guest_details_set', 'booking_guests', a.p_guest_id, {});
+      audit('guest_details_set', 'booking_guests', a.p_guest_id, { fill_only: !!a.p_fill_only });
       emit('booking_guests');
       return null;
     },
 
     set_booking_guest_details_batch: (a) => {
-      need(isActiveUser() && hasPerm('enter_guest_details'));
+      need(isActiveUser() && isAdmin());
       if (!Array.isArray(a.p_rows)) throw new PgError('ERR_INVALID_ROWS');
       if (a.p_rows.length > 200) throw new PgError('ERR_INVALID_LIMIT');
       for (const r of a.p_rows as Row[]) {
@@ -693,6 +695,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
           { p_guest_name: r.guest_name, p_unit: r.unit, p_service_number: r.service_number, p_phone: r.phone },
           true,
         );
+        audit('guest_details_set', 'booking_guests', r.guest_id, { fill_only: true });
       }
       if (a.p_rows.length > 0) audit('guest_details_backfilled', 'booking_guests', null, { count: a.p_rows.length });
       emit('booking_guests');
