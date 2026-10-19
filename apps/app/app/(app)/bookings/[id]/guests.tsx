@@ -230,7 +230,15 @@ export default function GuestDetailsBackfillScreen() {
                 setCategoryDraft(v);
                 setCategoryMsg(null);
               }}
-              options={(Object.keys(CATEGORIES) as VisitorCategory[]).map((code) => ({
+              options={(Object.keys(CATEGORIES) as VisitorCategory[])
+                // Moving to a higher priority (protects against eviction) is admin-only.
+                .filter(
+                  (code) =>
+                    userRole === 'admin' ||
+                    !booking ||
+                    CATEGORIES[code].priorityOrder >= CATEGORIES[booking.category as VisitorCategory].priorityOrder,
+                )
+                .map((code) => ({
                 label: `${CATEGORIES[code].name} (${code})`,
                 value: code,
               }))}

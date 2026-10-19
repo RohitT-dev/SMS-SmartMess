@@ -2241,6 +2241,20 @@ describe('allow room sharing', () => {
     expect(bad.error?.message).toContain('ERR_INVALID_REQUEST');
   });
 
+  it('a clerk may lower a booking\'s category but not raise it', async () => {
+    const a = await book({ ...stay, category: 'LEAVE', guests: [G('M', 'FO')], allow: false });
+    await signInAs('clerk');
+    try {
+      const down = await sb.rpc('set_booking_category', { p_booking_id: a.id, p_category: 'TD' });
+      expect(down.error, down.error?.message).toBeNull();
+      const up = await sb.rpc('set_booking_category', { p_booking_id: a.id, p_category: 'MFA' });
+      expect(up.error?.message).toContain('ERR_CATEGORY_UPGRADE_ADMIN');
+      expect((await bookingRow(a.id)).category).toBe('TD');
+    } finally {
+      await signInAs('admin');
+    }
+  });
+
   it('a request left unchecked is refused a shared bed when it is allotted', async () => {
     const guests = guestRowsPayload([G('M', 'FO')]);
     await book({ ...stay, guests: [G('M', 'FO')], allow: true, pref: 'VIP' }); // V-01 bed 1

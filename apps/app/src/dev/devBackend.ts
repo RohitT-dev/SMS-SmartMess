@@ -676,6 +676,11 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       if (!b) throw new PgError('ERR_NOT_FOUND');
       if (b.status !== 'PENDING_ALLOTMENT' && b.status !== 'CONFIRMED') throw new PgError('ERR_BOOKING_NOT_ACTIVE');
       if (b.is_suite_booking && !isAdmin()) throw new PgError('ERR_SUITE_ONLY_ADMIN');
+      // Raising priority protects a booking from eviction and denial: admins only.
+      const order = ['MFA', 'PI', 'LEAVE', 'TD'];
+      if (order.indexOf(a.p_category) < order.indexOf(b.category) && !isAdmin()) {
+        throw new PgError('ERR_CATEGORY_UPGRADE_ADMIN');
+      }
       if (b.category !== a.p_category) {
         const from = b.category;
         b.category = a.p_category;

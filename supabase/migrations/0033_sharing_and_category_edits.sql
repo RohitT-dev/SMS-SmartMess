@@ -7,7 +7,9 @@
 --         booking holds an overlapping ACTIVE allocation in any of its rooms.
 --     Other statuses raise ERR_BOOKING_NOT_ACTIVE (was ERR_BOOKING_NOT_PENDING).
 --  2. set_booking_category(): change a booking's category (e.g. MFA -> TD) while it is active.
---     Audited as booking_category_changed with the old and new category.
+--     Category is eviction/denial priority (MFA > PI > LEAVE > TD; MFA and PI cannot be evicted), so
+--     only an admin may move a booking to a HIGHER priority; a clerk may only lower it. Raises
+--     ERR_CATEGORY_UPGRADE_ADMIN otherwise. Audited as booking_category_changed with from/to.
 --
 -- Idempotent: CREATE OR REPLACE.
 
@@ -130,6 +132,13 @@ BEGIN
 
   IF v_booking.category = p_category THEN
     RETURN;
+  END IF;
+
+  -- Raising priority protects a booking from eviction and denial: admins only.
+  IF array_position(ARRAY['MFA', 'PI', 'LEAVE', 'TD']::public.category[], p_category)
+       < array_position(ARRAY['MFA', 'PI', 'LEAVE', 'TD']::public.category[], v_booking.category)
+     AND NOT public.is_admin() THEN
+    RAISE EXCEPTION 'ERR_CATEGORY_UPGRADE_ADMIN' USING errcode = 'P0001';
   END IF;
 
   UPDATE public.bookings

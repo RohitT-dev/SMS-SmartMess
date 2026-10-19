@@ -23,6 +23,7 @@ const EXTRA_MESSAGES: Array<[match: string, message: string]> = [
   ['ERR_ROOM_CLOSED', 'Cannot extend stay: the room is scheduled for maintenance during the requested period.'],
   ['ERR_DOUBLE_BOOKING', 'Cannot extend stay: the room or bed is already booked by another guest for overlapping dates.'],
   ['ERR_BOOKING_NOT_ACTIVE', 'This booking is no longer active (it may already be cancelled, displaced or completed), so it cannot be changed.'],
+  ['ERR_CATEGORY_UPGRADE_ADMIN', 'Only an Administrator can move a booking to a higher-priority category.'],
   ['ERR_BOOKING_NOT_PENDING', 'This request has already been allotted, cancelled or denied. Reload the requests list to see its current state.'],
   ['ERR_INCOMPLETE_ALLOTMENT', 'Every guest in the party needs a bed. Assign a room and bed to each guest and try again.'],
   ['ERR_INVALID_GUEST', 'A selected bed does not match a guest of this booking. Go back and reload the request.'],
