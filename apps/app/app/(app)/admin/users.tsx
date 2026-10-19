@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, useWindowDimensions } from 'react-native';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { FunctionsHttpError } from '@supabase/supabase-js';
 import { useThemeStore } from '../../../src/state/themeStore';
 import { useSessionStore } from '../../../src/state/sessionStore';
 import { Screen } from '../../../src/ui/primitives/Screen';
@@ -93,7 +94,15 @@ export default function AdminUsersScreen() {
               : ['create_booking', 'enter_guest_details', 'view_reports', 'deny_request'],
         },
       });
-      if (error) throw error;
+      if (error) {
+        // A non-2xx reply surfaces as FunctionsHttpError with a generic message; the function's
+        // own { error } body is on error.context (the fetch Response).
+        if (error instanceof FunctionsHttpError) {
+          const body = await (error.context as Response).json().catch(() => null);
+          if (body && typeof body.error === 'string') throw new Error(body.error);
+        }
+        throw error;
+      }
       logAction('users.invite', {
         entity: 'profiles',
         entityId: (data as any)?.userId ?? null,
