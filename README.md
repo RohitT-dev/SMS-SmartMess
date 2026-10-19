@@ -254,6 +254,7 @@ scripts/supabase-migrate.sh functions         # deploy all edge functions
 scripts/supabase-migrate.sh status            # local vs remote migration list
 scripts/supabase-migrate.sh pending           # local migrations the remote has not recorded
 scripts/supabase-migrate.sh repair            # renumber history rows recorded under dashboard timestamps
+scripts/supabase-migrate.sh mark-applied 0023 0024  # record migrations that are already live, without running them
 scripts/supabase-migrate.sh remote --psql     # push through psql when the CLI hangs (add --dry-run to preview)
 ```
 Remote commands need `supabase link --project-ref <ref>` once (or `SUPABASE_PROJECT_REF`); `SUPABASE_DB_PASSWORD` is passed through when set. Remote CLI calls stop after `CLI_TIMEOUT` seconds (default 180) instead of hanging.
