@@ -643,16 +643,44 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       if (a.p_allow == null) throw new PgError('ERR_INVALID_REQUEST');
       const b = bookingById(a.p_booking_id);
       if (!b) throw new PgError('ERR_NOT_FOUND');
-      const holdsNoBed = !db.allocations.some((al) => al.booking_id === b.id && al.status === 'ACTIVE');
-      if (!(b.status === 'PENDING_ALLOTMENT' || (b.status === 'CONFIRMED' && holdsNoBed))) {
-        throw new PgError('ERR_BOOKING_NOT_PENDING');
-      }
+      if (b.status !== 'PENDING_ALLOTMENT' && b.status !== 'CONFIRMED') throw new PgError('ERR_BOOKING_NOT_ACTIVE');
       if (b.is_suite_booking && !isAdmin()) throw new PgError('ERR_SUITE_ONLY_ADMIN');
       const allow = Boolean(a.p_allow);
+      if (!allow) {
+        // Taking a room back for itself only works while nobody from another booking is beside it.
+        const mine = db.allocations.filter((al) => al.booking_id === b.id && al.status === 'ACTIVE');
+        const shared = mine.some((m) =>
+          db.allocations.some(
+            (o) =>
+              o.status === 'ACTIVE' &&
+              o.room_id === m.room_id &&
+              o.booking_id !== b.id &&
+              overlaps(parseRange(o.stay), parseRange(m.stay)),
+          ),
+        );
+        if (shared) throw new PgError('ERR_ROOM_EXCLUSIVE');
+      }
       if (allowsSharing(b) !== allow) {
         b.allow_sharing = allow;
         b.updated_at = nowIso();
         audit('booking_sharing_changed', 'bookings', b.id, { allow_sharing: allow });
+        emit('bookings');
+      }
+      return null;
+    },
+
+    set_booking_category: (a) => {
+      need(isActiveUser() && (hasPerm('create_booking') || isAdmin()));
+      if (!a.p_category || !['MFA', 'PI', 'LEAVE', 'TD'].includes(a.p_category)) throw new PgError('ERR_INVALID_REQUEST');
+      const b = bookingById(a.p_booking_id);
+      if (!b) throw new PgError('ERR_NOT_FOUND');
+      if (b.status !== 'PENDING_ALLOTMENT' && b.status !== 'CONFIRMED') throw new PgError('ERR_BOOKING_NOT_ACTIVE');
+      if (b.is_suite_booking && !isAdmin()) throw new PgError('ERR_SUITE_ONLY_ADMIN');
+      if (b.category !== a.p_category) {
+        const from = b.category;
+        b.category = a.p_category;
+        b.updated_at = nowIso();
+        audit('booking_category_changed', 'bookings', b.id, { from, to: a.p_category });
         emit('bookings');
       }
       return null;
@@ -1491,7 +1519,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
       const data = fn(args);
       persist();
       // Only booking writes notify realtime subscribers; read RPCs must not (they'd refetch forever).
-      if (['create_booking', 'cancel_booking', 'approve_eviction', 'allot_booking_rooms', 'create_booking_request', 'record_denial', 'update_booking_dates', 'set_booking_allow_sharing'].includes(name)) {
+      if (['create_booking', 'cancel_booking', 'approve_eviction', 'allot_booking_rooms', 'create_booking_request', 'record_denial', 'update_booking_dates', 'set_booking_allow_sharing', 'set_booking_category'].includes(name)) {
         ['allocations', 'bookings', 'booking_guests', 'rooms'].forEach(emit);
       }
       return { data: data === undefined ? null : clone(data), error: null };
