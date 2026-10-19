@@ -65,9 +65,16 @@ serve(async (req: Request) => {
       .from('profiles')
       .select('role, is_active')
       .eq('id', callerUser.id)
-      .single();
+      .maybeSingle();
 
-    if (profileError || !callerProfile || !callerProfile.is_active || callerProfile.role !== 'admin') {
+    if (profileError) {
+      return new Response(
+        JSON.stringify({ error: `Could not verify caller profile: ${profileError.message}` }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    if (!callerProfile || !callerProfile.is_active || callerProfile.role !== 'admin') {
       return new Response(
         JSON.stringify({ error: 'Forbidden: Caller must be an active Administrator' }),
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -83,7 +90,13 @@ serve(async (req: Request) => {
     } catch {
       callerAal = undefined;
     }
-    const { data: mfaRequired } = await adminClient.rpc('mfa_required');
+    const { data: mfaRequired, error: mfaError } = await adminClient.rpc('mfa_required');
+    if (mfaError) {
+      return new Response(
+        JSON.stringify({ error: `Could not read MFA policy: ${mfaError.message}` }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
     if (mfaRequired !== false && callerAal !== 'aal2') {
       return new Response(
         JSON.stringify({ error: 'Forbidden: MFA (AAL2) session required' }),
