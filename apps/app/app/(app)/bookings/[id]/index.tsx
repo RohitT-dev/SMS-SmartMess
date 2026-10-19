@@ -149,8 +149,15 @@ export default function BookingDetailRecordScreen() {
       queryClient.invalidateQueries({ queryKey: ['booking_audit', id] });
       queryClient.invalidateQueries({ queryKey: ['bookings_ledger'] });
       queryClient.invalidateQueries({ queryKey: ['pending_booking_requests'] });
+      queryClient.invalidateQueries({ queryKey: ['daily_room_state'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboard_counts'] });
     } catch (err: unknown) {
-      setErrorMsg(userErrorMessage(err, 'Could not change room sharing'));
+      const raw = err && typeof err === 'object' && 'message' in err ? String((err as { message: unknown }).message) : '';
+      setErrorMsg(
+        !next && raw.includes('ERR_ROOM_EXCLUSIVE')
+          ? 'A guest from another booking is already sharing this room, so sharing cannot be turned off.'
+          : userErrorMessage(err, 'Could not change room sharing'),
+      );
     } finally {
       setSavingSharing(false);
     }
@@ -404,6 +411,23 @@ export default function BookingDetailRecordScreen() {
               </Text>
             </View>
           </View>
+
+          {/* An allotted booking can open its room(s) for sharing, or take them back while alone. */}
+          {booking?.status === 'CONFIRMED' && !isPendingAllotment && canEditThisBooking && (
+            <View style={{ marginTop: spacing.md }}>
+              <Checkbox
+                label="Allow room sharing"
+                hint={
+                  booking?.allow_sharing !== false
+                    ? 'The free bed in this booking\'s room(s) can be given to a compatible guest from another booking.'
+                    : 'This booking holds its room(s) for itself. Tick to let another booking use the free bed.'
+                }
+                checked={booking?.allow_sharing !== false}
+                onChange={handleToggleSharing}
+                disabled={savingSharing}
+              />
+            </View>
+          )}
 
           {(booking?.status === 'CONFIRMED' || booking?.status === 'PENDING_ALLOTMENT') && (
             <View style={{ flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md, flexWrap: 'wrap' }}>

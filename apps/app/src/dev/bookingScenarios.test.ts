@@ -2188,7 +2188,7 @@ describe('allow room sharing', () => {
     expect((await bookingRow(on.data)).allow_sharing).toBe(true);
   });
 
-  it('a pending request can change the option; a request that holds beds cannot', async () => {
+  it('a pending request can change the option; an allotted one can open up but not close while shared', async () => {
     const guests = guestRowsPayload([G('M', 'FO')]);
     const base = { category: 'LEAVE', check_in: d(0), check_out: d(2), party_size: 1, is_suite_booking: false };
     const { data: id } = await sb.rpc('create_booking_request', { p_booking: base, p_guests: guests });
@@ -2206,10 +2206,53 @@ describe('allow room sharing', () => {
     });
     expect(allot.error, allot.error?.message).toBeNull();
 
-    // ...and is frozen once beds are held.
+    // ...and cannot take the room back for itself while someone from another booking is beside it.
     const late = await sb.rpc('set_booking_allow_sharing', { p_booking_id: id, p_allow: false });
-    expect(late.error?.message).toContain('ERR_BOOKING_NOT_PENDING');
+    expect(late.error?.message).toContain('ERR_ROOM_EXCLUSIVE');
     expect((await bookingRow(id)).allow_sharing).toBe(true);
+  });
+
+  it('an individually allotted booking can be made shareable, and back while it is alone', async () => {
+    const a = await book({ ...stay, guests: [G('M', 'FO')], allow: false }); // N-01, held
+    const blocked = await placeInto({ ...stay, guests: [G('M', 'FO')], allow: true }, [[0, 'N-01', 2]]);
+    expect(blocked.error?.message).toContain('ERR_ROOM_EXCLUSIVE');
+
+    const open = await sb.rpc('set_booking_allow_sharing', { p_booking_id: a.id, p_allow: true });
+    expect(open.error, open.error?.message).toBeNull();
+    expect((await occupantsOf('N-01'))[0].allowSharing).toBe(true);
+
+    // Still alone in the room: it may close it again.
+    const close = await sb.rpc('set_booking_allow_sharing', { p_booking_id: a.id, p_allow: false });
+    expect(close.error, close.error?.message).toBeNull();
+    await sb.rpc('set_booking_allow_sharing', { p_booking_id: a.id, p_allow: true });
+
+    const beside = await placeInto({ ...stay, guests: [G('M', 'FLT_LT')], allow: true }, [[0, 'N-01', 2]]);
+    expect(beside.error, beside.error?.message).toBeNull();
+    const shut = await sb.rpc('set_booking_allow_sharing', { p_booking_id: a.id, p_allow: false });
+    expect(shut.error?.message).toContain('ERR_ROOM_EXCLUSIVE');
+  });
+
+  it('the category of an active booking can be changed, and is audited', async () => {
+    const a = await book({ ...stay, guests: [G('M', 'FO')], allow: false });
+    const res = await sb.rpc('set_booking_category', { p_booking_id: a.id, p_category: 'TD' });
+    expect(res.error, res.error?.message).toBeNull();
+    expect((await bookingRow(a.id)).category).toBe('TD');
+    const bad = await sb.rpc('set_booking_category', { p_booking_id: a.id, p_category: 'XX' });
+    expect(bad.error?.message).toContain('ERR_INVALID_REQUEST');
+  });
+
+  it('a clerk may lower a booking\'s category but not raise it', async () => {
+    const a = await book({ ...stay, category: 'LEAVE', guests: [G('M', 'FO')], allow: false });
+    await signInAs('clerk');
+    try {
+      const down = await sb.rpc('set_booking_category', { p_booking_id: a.id, p_category: 'TD' });
+      expect(down.error, down.error?.message).toBeNull();
+      const up = await sb.rpc('set_booking_category', { p_booking_id: a.id, p_category: 'MFA' });
+      expect(up.error?.message).toContain('ERR_CATEGORY_UPGRADE_ADMIN');
+      expect((await bookingRow(a.id)).category).toBe('TD');
+    } finally {
+      await signInAs('admin');
+    }
   });
 
   it('a request left unchecked is refused a shared bed when it is allotted', async () => {

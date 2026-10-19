@@ -32,6 +32,8 @@ const LABELS: Record<string, string> = {
   'bookings.allot': 'Room allotted (client)',
   booking_sharing_changed: 'Room sharing changed',
   'bookings.set_sharing': 'Room sharing changed (client)',
+  booking_category_changed: 'Category changed',
+  'bookings.set_category': 'Category changed (client)',
 };
 
 /** Readable label for an audit action code; unknown codes are title-cased. */

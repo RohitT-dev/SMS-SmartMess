@@ -9,6 +9,8 @@ import { Button } from '../../../../src/ui/primitives/Button';
 import { Field } from '../../../../src/ui/primitives/Field';
 import { Badge } from '../../../../src/ui/primitives/Badge';
 import { Banner } from '../../../../src/ui/primitives/Banner';
+import { Select } from '../../../../src/ui/primitives/Select';
+import { useSessionStore } from '../../../../src/state/sessionStore';
 import { spacing, typography } from '../../../../src/ui/tokens';
 import { supabase } from '../../../../src/lib/supabase';
 import { logAction } from '../../../../src/lib/activityLog';
@@ -18,7 +20,13 @@ import {
   computeIdBlindIndex,
   getActiveKeyVersion,
 } from '../../../../src/features/crypto-session/cryptoSession';
-import { CivilianPiiSchema, GuestPiiSchema, type GuestPii } from '@sms/core';
+import {
+  CATEGORIES,
+  CivilianPiiSchema,
+  GuestPiiSchema,
+  type GuestPii,
+  type VisitorCategory,
+} from '@sms/core';
 import { describeGuest } from '../../../../src/features/bookings/party';
 import { guestHasName, guestName } from '../../../../src/features/bookings/guestDisplay';
 import { savePlainGuestDetails } from '../../../../src/features/bookings/plainGuestDetails';
@@ -71,6 +79,61 @@ export default function GuestDetailsBackfillScreen() {
       return data || [];
     },
   });
+
+  // Booking category (MFA / PI / LEAVE / TD) can be corrected here while the booking is active.
+  const { userRole, userPermissions } = useSessionStore();
+  const { data: booking } = useQuery({
+    queryKey: ['booking_category', id],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('bookings')
+        .select('id, category, status, is_suite_booking')
+        .eq('id', id)
+        .single();
+      if (error) throw error;
+      return data;
+    },
+  });
+  const canEditCategory =
+    !!booking &&
+    (booking.status === 'CONFIRMED' || booking.status === 'PENDING_ALLOTMENT') &&
+    (booking.is_suite_booking
+      ? userRole === 'admin'
+      : userRole === 'admin' || userPermissions.includes('create_booking'));
+  const [categoryDraft, setCategoryDraft] = useState<VisitorCategory | null>(null);
+  const [savingCategory, setSavingCategory] = useState(false);
+  const [categoryMsg, setCategoryMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const selectedCategory = (categoryDraft ?? booking?.category) as VisitorCategory | undefined;
+
+  const handleSaveCategory = async () => {
+    if (!booking || !selectedCategory || selectedCategory === booking.category) return;
+    setSavingCategory(true);
+    setCategoryMsg(null);
+    try {
+      const { error } = await supabase.rpc('set_booking_category', {
+        p_booking_id: id,
+        p_category: selectedCategory,
+      });
+      if (error) throw error;
+      logAction('bookings.set_category', {
+        entity: 'bookings',
+        entityId: id,
+        meta: { from: booking.category, to: selectedCategory },
+      });
+      setCategoryDraft(null);
+      setCategoryMsg({ type: 'success', text: `Category changed to ${CATEGORIES[selectedCategory].name}.` });
+      queryClient.invalidateQueries({ queryKey: ['booking_category', id] });
+      queryClient.invalidateQueries({ queryKey: ['booking_record', id] });
+      queryClient.invalidateQueries({ queryKey: ['booking_audit', id] });
+      queryClient.invalidateQueries({ queryKey: ['bookings_ledger'] });
+      queryClient.invalidateQueries({ queryKey: ['pending_booking_requests'] });
+      queryClient.invalidateQueries({ queryKey: ['daily_room_state'] });
+    } catch (err: unknown) {
+      setCategoryMsg({ type: 'error', text: userErrorMessage(err, 'Could not change the category') });
+    } finally {
+      setSavingCategory(false);
+    }
+  };
 
   const guestList = guests || [];
   const currentGuest = guestList[currentIdx];
@@ -155,6 +218,47 @@ export default function GuestDetailsBackfillScreen() {
   return (
     <Screen title="Guest Details" showBack={true}>
       <View style={styles.container}>
+        {canEditCategory && (
+          <Card style={{ marginBottom: spacing.md }}>
+            <Text style={[styles.progressText, { color: colors.navy, marginBottom: spacing.sm }]}>
+              Accommodation type
+            </Text>
+            <Select<VisitorCategory>
+              label="Category"
+              selectedValue={selectedCategory}
+              onValueChange={(v) => {
+                setCategoryDraft(v);
+                setCategoryMsg(null);
+              }}
+              options={(Object.keys(CATEGORIES) as VisitorCategory[])
+                // Moving to a higher priority (protects against eviction) is admin-only.
+                .filter(
+                  (code) =>
+                    userRole === 'admin' ||
+                    !booking ||
+                    CATEGORIES[code].priorityOrder >= CATEGORIES[booking.category as VisitorCategory].priorityOrder,
+                )
+                .map((code) => ({
+                label: `${CATEGORIES[code].name} (${code})`,
+                value: code,
+              }))}
+              disabled={savingCategory}
+            />
+            {categoryMsg && (
+              <Banner type={categoryMsg.type} message={categoryMsg.text} style={{ marginTop: spacing.sm }} />
+            )}
+            <View style={styles.buttonsRow}>
+              <Button
+                label="Save category"
+                variant="primary"
+                loading={savingCategory}
+                disabled={!selectedCategory || selectedCategory === booking?.category}
+                onPress={handleSaveCategory}
+              />
+            </View>
+          </Card>
+        )}
+
         <Card>
           <View style={styles.progressRow}>
             <Text style={[styles.progressText, { color: colors.navy }]}>
