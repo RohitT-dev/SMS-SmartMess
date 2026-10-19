@@ -22,7 +22,7 @@ export interface DateRangeProps {
   hideNights?: boolean;
 }
 
-interface DateInputProps {
+export interface DateInputProps {
   value: string;
   onChange?: (v: string) => void;
   accessibilityLabel: string;
@@ -31,7 +31,7 @@ interface DateInputProps {
 }
 
 /** Native date picker on web; plain YYYY-MM-DD text input on native. */
-const DateInput: React.FC<DateInputProps> = ({ value, onChange, accessibilityLabel, disabled, hasError }) => {
+export const DateInput: React.FC<DateInputProps> = ({ value, onChange, accessibilityLabel, disabled, hasError }) => {
   const colors = useThemeStore((s) => s.colors);
   const isDark = useThemeStore((s) => s.isDark);
   const borderColor = hasError ? colors.red : colors.borderStrong;

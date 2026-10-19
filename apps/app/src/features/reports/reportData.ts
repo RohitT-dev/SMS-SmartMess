@@ -1,16 +1,17 @@
 /**
  * Data loading for reports (Supabase + decrypted PII fallback). The mapping lives in the pure
- * modules (pastBookingItems.ts, gridGuests.ts); this file only fetches.
+ * modules (guestReport.ts, gridGuests.ts); this file only fetches.
  */
 import { supabase } from '../../lib/supabase';
 import { decryptGuestPii } from '../crypto-session/cryptoSession';
 import type { GuestPiiLike } from '../bookings/guestDisplay';
 import type { GridGuestRow } from './gridGuests';
 import {
-  buildPastBookingItems,
-  type RawPastBooking,
-} from './pastBookingItems';
-import type { PastBookingPdfItem } from './pastBookingsHtml';
+  buildGuestReportRows,
+  type GuestReportRow,
+  type RawReportBooking,
+  type ReportRoom,
+} from './guestReport';
 
 const CHUNK = 60;
 
@@ -46,39 +47,6 @@ export async function fetchPiiFallback(guestIds: string[]): Promise<Map<string, 
   return map;
 }
 
-export interface PastBookingsQuery {
-  /** Local calendar date; bookings are "past" when they ended on/before it or are completed/cancelled. */
-  today: string;
-  /** Optional stay window (inclusive start, exclusive end) to restrict the register to a period. */
-  from?: string;
-  toExclusive?: string;
-  roomNames?: Record<string, string>;
-}
-
-export async function fetchPastBookingItems({
-  today,
-  from,
-  toExclusive,
-  roomNames,
-}: PastBookingsQuery): Promise<PastBookingPdfItem[]> {
-  let query = supabase
-    .from('bookings')
-    .select('*, booking_guests(*), allocations(*)')
-    .or(`check_out.lte.${today},status.in.(COMPLETED,CANCELLED)`);
-  if (from) query = query.gt('check_out', from);
-  if (toExclusive) query = query.lt('check_in', toExclusive);
-  const { data, error } = await query.order('check_out', { ascending: false });
-  if (error) throw error;
-
-  const bookings = (data ?? []) as RawPastBooking[];
-  const nameless = bookings
-    .flatMap((b) => b.booking_guests ?? [])
-    .filter((g) => !g.guest_name?.trim())
-    .map((g) => g.id);
-  const piiByGuestId = nameless.length > 0 ? await fetchPiiFallback(nameless) : undefined;
-  return buildPastBookingItems(bookings, { piiByGuestId, roomNames });
-}
-
 export interface GridGuestData {
   guests: GridGuestRow[];
   pii: Map<string, GuestPiiLike>;
@@ -98,4 +66,48 @@ export async function fetchGridGuests(bookingIds: string[]): Promise<GridGuestDa
   const nameless = guests.filter((g) => !g.guest_name?.trim()).map((g) => g.id);
   const pii = nameless.length > 0 ? await fetchPiiFallback(nameless) : new Map<string, GuestPiiLike>();
   return { guests, pii };
+}
+
+export interface GuestReportQuery {
+  today: string;
+  /** Stay window (inclusive start, exclusive end); omit both for every booking. */
+  from?: string;
+  toExclusive?: string;
+  rooms?: Record<string, ReportRoom>;
+  /** Prefer the bed held on this day. */
+  day?: string;
+}
+
+/**
+ * Every guest of every booking overlapping the window, one row each, in any status. Filtering by
+ * room type, category, unit etc. happens client-side (filterGuestReportRows) so the screen can
+ * show a live count while the filters change.
+ */
+export async function fetchGuestReportRows({
+  today,
+  from,
+  toExclusive,
+  rooms,
+  day,
+}: GuestReportQuery): Promise<GuestReportRow[]> {
+  let query = supabase
+    .from('bookings')
+    .select(
+      'id, category, status, check_in, check_out, ' +
+        'booking_guests(id, seq, gender, rank_code, relation, guest_code, guest_name, unit, service_number, phone), ' +
+        'allocations(room_id, guest_id, bed_slot, status, stay)',
+    )
+    .is('deleted_at', null);
+  if (from) query = query.gt('check_out', from);
+  if (toExclusive) query = query.lt('check_in', toExclusive);
+  const { data, error } = await query.order('check_in', { ascending: true });
+  if (error) throw error;
+
+  const bookings = (data ?? []) as unknown as RawReportBooking[];
+  const nameless = bookings
+    .flatMap((b) => b.booking_guests ?? [])
+    .filter((g) => !g.guest_name?.trim())
+    .map((g) => g.id);
+  const piiByGuestId = nameless.length > 0 ? await fetchPiiFallback(nameless) : undefined;
+  return buildGuestReportRows(bookings, { today, rooms, piiByGuestId, day });
 }
