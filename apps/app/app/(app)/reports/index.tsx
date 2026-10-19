@@ -21,9 +21,6 @@ import {
   previewInsightsReport,
   previewOccupancyReport,
 } from '../../../src/features/reports/pdfGenerator';
-import { exportPastBookingsPdf } from '../../../src/features/reports/pastBookingsPdfGenerator';
-import { fetchPastBookingItems } from '../../../src/features/reports/reportData';
-import { useRoomNames } from '../../../src/features/rooms/useRoomNames';
 import { reportInsights, type ReportDailyRow } from '@sms/core';
 
 export default function ReportsScreen() {
@@ -122,41 +119,26 @@ export default function ReportsScreen() {
   const denialCount = (denials || []).reduce((sum: number, d: { count: number }) => sum + d.count, 0);
   const insights = reportInsights(dailyRows || [], totalBeds, denialCount);
 
-  const { data: roomNames } = useRoomNames();
-  const [exporting, setExporting] = useState<'occupancy' | 'insights' | 'past' | null>(null);
+  const [exporting, setExporting] = useState<'occupancy' | 'insights' | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
 
   // Printed documents state the actual dates, not just "This Month".
   const printedPeriod =
     rangePreset === 'custom' ? periodLabel : `${periodLabel} (${fromDate} to ${toDateInclusive})`;
 
-  const runExport = async (kind: 'occupancy' | 'insights' | 'past') => {
+  const runExport = async (kind: 'occupancy' | 'insights') => {
     if (!rangeValid) return;
     setExporting(kind);
     setExportError(null);
     try {
-      if (kind === 'past') {
-        const bookings = await fetchPastBookingItems({
-          today: localDateString(),
-          from: fromDate,
-          toExclusive: toDate,
-          roomNames,
-        });
-        await exportPastBookingsPdf({
-          title: 'Past Bookings Register',
-          bookings,
-          filterLabel: `Stays in ${printedPeriod}`,
-        });
-      } else {
-        const options = {
-          periodLabel: printedPeriod,
-          insights,
-          dailyRows: dailyRows || [],
-          denials: denials || [],
-        };
-        if (kind === 'occupancy') previewOccupancyReport(options);
-        else previewInsightsReport(options);
-      }
+      const options = {
+        periodLabel: printedPeriod,
+        insights,
+        dailyRows: dailyRows || [],
+        denials: denials || [],
+      };
+      if (kind === 'occupancy') previewOccupancyReport(options);
+      else previewInsightsReport(options);
       logAction('reports.open_preview', { meta: { report: kind, period: periodLabel } });
     } catch (err: any) {
       setExportError(userErrorMessage(err, 'Could not prepare the report.'));
@@ -211,7 +193,8 @@ export default function ReportsScreen() {
           <Text style={[styles.cardTitle, { color: colors.navy }]}>Export reports (PDF)</Text>
           <Text style={[styles.chartNotice, { color: colors.muted }]}>
             Each report opens a preview of the A4 document for the period above, then prints, saves or
-            shares it. Past bookings lists names, full ranks, units and service numbers.
+            shares it. The guest report has its own filters (room type, category, unit, dates, status)
+            and lists names, ranks, units, service numbers, phones and rooms.
           </Text>
           <View style={styles.exportRow}>
             <Button
@@ -229,11 +212,9 @@ export default function ReportsScreen() {
               disabled={!rangeValid || exporting !== null || isLoading}
             />
             <Button
-              label="Past bookings register"
+              label="Guest report (custom filters)"
               variant="primary"
-              onPress={() => runExport('past')}
-              loading={exporting === 'past'}
-              disabled={!rangeValid || exporting !== null}
+              onPress={() => router.push('/(app)/reports/guests' as any)}
             />
           </View>
         </Card>

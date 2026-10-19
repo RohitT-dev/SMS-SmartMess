@@ -32,7 +32,7 @@ export default function PdfPreviewScreen() {
       <Screen title="Report Preview" showBack={true}>
         <EmptyState
           title="No report to preview"
-          description="Open a report from Reports & Insights, Past Bookings or the Room Grid and choose its PDF button."
+          description="Open a report from Reports & Insights, the Guest Report or the Room Grid and choose its PDF button."
         />
         <View style={{ marginTop: spacing.md }}>
           <Button label="Back to reports" variant="secondary" onPress={() => router.replace('/(app)/reports' as any)} />

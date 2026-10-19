@@ -29,12 +29,8 @@ import {
   guestUnit,
 } from '../../../src/features/bookings/guestDisplay';
 import { filterBookings } from '../../../src/features/bookings/searchBookings';
-import { humanizeStatus } from '../../../src/lib/labels';
-import {
-  exportPastBookingsPdf,
-  type PastBookingPdfItem,
-} from '../../../src/features/reports/pastBookingsPdfGenerator';
-import type { PastBookingGuestItem } from '../../../src/features/reports/pastBookingsHtml';
+import type { PastBookingGuestItem, PastBookingPdfItem } from '../../../src/features/reports/pastBookingsHtml';
+import { STAY_STATUS_LABELS, stayStatus } from '../../../src/features/reports/guestReport';
 import type { Category } from '@sms/core';
 
 interface RawBookingRow {
@@ -84,7 +80,6 @@ export default function PastBookingsScreen() {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [categoryFilter, setCategoryFilter] = useState<string>('ALL');
-  const [exporting, setExporting] = useState(false);
 
   const { data: roomNames } = useRoomNames();
 
@@ -164,23 +159,11 @@ export default function PastBookingsScreen() {
     return items.filter((item) => hits.has(item.id));
   }, [rawBookings, items, searchQuery, categoryFilter, roomNames]);
 
-  const handleExportPdf = async () => {
-    if (exporting || filteredItems.length === 0) return;
-    setExporting(true);
-    try {
-      // Opens the A4 register on the preview screen (print / save / share from there). The search
-      // text itself is not printed or logged - it can be a name - only that a search was applied.
-      const scope = categoryFilter === 'ALL' ? 'All Past Stays' : `${categoryFilter} Category Stays`;
-      await exportPastBookingsPdf({
-        title: 'Past Bookings Register',
-        bookings: filteredItems,
-        filterLabel: searchQuery.trim() ? `${scope} (search filter applied)` : scope,
-      });
-    } catch (err) {
-      console.error('Failed to export past bookings PDF', err);
-    } finally {
-      setExporting(false);
-    }
+  // Printing goes through the guest report, which has its own filters (room type, category,
+  // unit, dates, status); it opens on completed stays, in the category chosen here.
+  const openGuestReport = () => {
+    const category = categoryFilter === 'ALL' ? '' : `&category=${categoryFilter}`;
+    router.push(`/(app)/reports/guests?preset=past${category}` as any);
   };
 
   return (
@@ -195,12 +178,7 @@ export default function PastBookingsScreen() {
                 Archived history of completed stays and past mess visits
               </Text>
             </View>
-            <Button
-              label={exporting ? 'Generating PDF...' : '📄 Download PDF'}
-              variant="primary"
-              onPress={handleExportPdf}
-              disabled={exporting || filteredItems.length === 0}
-            />
+            <Button label="📄 Print guest report" variant="primary" onPress={openGuestReport} />
           </View>
 
           {/* Stats Row */}
@@ -293,8 +271,9 @@ export default function PastBookingsScreen() {
                       #{item.id.slice(0, 8)}
                     </Text>
                     <Badge label={item.category} variant={item.category === 'MFA' ? 'navy' : 'neutral'} />
+                    {/* Nothing marks a booking COMPLETED, so an ended CONFIRMED stay shows as Completed. */}
                     <Badge
-                      label={humanizeStatus(item.status)}
+                      label={STAY_STATUS_LABELS[stayStatus(item.status, item.checkIn, item.checkOut, today)]}
                       variant={item.status === 'CONFIRMED' || item.status === 'COMPLETED' ? 'green' : 'neutral'}
                     />
                   </View>

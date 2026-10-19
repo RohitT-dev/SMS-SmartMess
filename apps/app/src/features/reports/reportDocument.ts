@@ -61,7 +61,7 @@ export function html(strings: TemplateStringsArray, ...values: unknown[]): SafeH
 export const DEFAULT_MESS_NAME = 'Residential Officers Mess';
 
 export type PageOrientation = 'portrait' | 'landscape';
-export type ReportKind = 'occupancy' | 'insights' | 'past_bookings' | 'grid';
+export type ReportKind = 'occupancy' | 'insights' | 'past_bookings' | 'grid' | 'guest_report';
 
 export interface ReportMeta {
   messName: string;
