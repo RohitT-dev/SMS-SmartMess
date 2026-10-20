@@ -159,19 +159,19 @@ export default function DashboardScreen() {
       {/* 1. Summary Strip */}
       {countsLoading ? (
         <View style={styles.statsStrip}>
-          {Array.from({ length: 5 }).map((_, i) => (
+          {Array.from({ length: 4 }).map((_, i) => (
             <Skeleton key={i} width={140} height={56} />
           ))}
         </View>
       ) : (
         <View style={styles.statsStrip}>
           <Stat label="Free rooms" value={counts?.free_rooms ?? 0} indicatorColor={colors.green} />
+          {/* Occupied rooms, shared or not: partly free plus full. */}
           <Stat
-            label="1 bed free"
-            value={counts?.one_bed_free_rooms ?? 0}
-            indicatorColor={colors.blue}
+            label="Occupied"
+            value={(counts?.one_bed_free_rooms ?? 0) + (counts?.full_rooms ?? 0)}
+            indicatorColor={colors.orange}
           />
-          <Stat label="Full" value={counts?.full_rooms ?? 0} indicatorColor={colors.orange} />
           <Stat
             label="Out of service"
             value={counts?.out_of_service_rooms ?? 0}
