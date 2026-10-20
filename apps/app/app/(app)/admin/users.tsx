@@ -19,6 +19,8 @@ import { logAction } from '../../../src/lib/activityLog';
 import { userErrorMessage } from '../../../src/lib/userError';
 import { useAuthStore } from '../../../src/state/authStore';
 
+const MIN_PASSWORD_LENGTH = 12;
+
 export default function AdminUsersScreen() {
   const colors = useThemeStore((s) => s.colors);
   const { userRole } = useSessionStore();
@@ -41,6 +43,9 @@ export default function AdminUsersScreen() {
   const [showInviteDialog, setShowInviteDialog] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<'admin' | 'clerk'>('clerk');
+  const [invitePassword, setInvitePassword] = useState('');
+  const [invitePasswordConfirm, setInvitePasswordConfirm] = useState('');
+  const [inviteNotice, setInviteNotice] = useState<string | null>(null);
   const [inviting, setInviting] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
 
@@ -81,6 +86,14 @@ export default function AdminUsersScreen() {
       setInviteError('Enter a valid email address.');
       return;
     }
+    if (invitePassword.length < MIN_PASSWORD_LENGTH) {
+      setInviteError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
+      return;
+    }
+    if (invitePassword !== invitePasswordConfirm) {
+      setInviteError('Passwords do not match.');
+      return;
+    }
     setInviting(true);
     setInviteError(null);
     try {
@@ -88,6 +101,7 @@ export default function AdminUsersScreen() {
         body: {
           email,
           role: inviteRole,
+          password: invitePassword,
           permissions:
             inviteRole === 'admin'
               ? allAvailablePermissions.map((p) => p.key)
@@ -103,19 +117,29 @@ export default function AdminUsersScreen() {
         }
         throw error;
       }
-      logAction('users.invite', {
+      logAction('users.create', {
         entity: 'profiles',
         entityId: (data as any)?.userId ?? null,
         meta: { role: inviteRole },
       });
-      setShowInviteDialog(false);
-      setInviteEmail('');
+      setInviteNotice(
+        `Account created for ${email}. Share the password securely; they can change it from Settings after signing in.`,
+      );
+      closeInviteDialog();
       queryClient.invalidateQueries({ queryKey: ['admin_profiles'] });
     } catch (err: any) {
       setInviteError(userErrorMessage(err, 'Failed to invite user'));
     } finally {
       setInviting(false);
     }
+  };
+
+  const closeInviteDialog = () => {
+    setShowInviteDialog(false);
+    setInviteEmail('');
+    setInvitePassword('');
+    setInvitePasswordConfirm('');
+    setInviteError(null);
   };
 
   const handleSavePermissions = async () => {
@@ -240,13 +264,16 @@ export default function AdminUsersScreen() {
             <View style={{ flex: 1, minWidth: 220 }}>
               <Text style={[styles.title, { color: colors.navy }]}>Staff and credentials</Text>
               <Text style={[styles.subtitle, { color: colors.muted }]}>
-                Invitation only. There must always be at least one active Administrator.
+                Only administrators add staff. There must always be at least one active Administrator.
               </Text>
             </View>
             <Button
-              label="+ Invite Team Member"
+              label="+ Add Team Member"
               variant="primary"
-              onPress={() => setShowInviteDialog(true)}
+              onPress={() => {
+                setInviteNotice(null);
+                setShowInviteDialog(true);
+              }}
             />
           </View>
         </Card>
@@ -257,6 +284,10 @@ export default function AdminUsersScreen() {
             message={(profilesError as any).message || 'Failed to load staff list'}
             style={{ marginTop: spacing.md }}
           />
+        )}
+
+        {inviteNotice && (
+          <Banner type="success" message={inviteNotice} style={{ marginTop: spacing.md }} />
         )}
 
         {actionError && <Banner type="error" message={actionError} style={{ marginTop: spacing.md }} />}
@@ -372,12 +403,12 @@ export default function AdminUsersScreen() {
         {/* Invite Dialog */}
         <Dialog
           visible={showInviteDialog}
-          title="Invite New Staff Member"
-          message="Sends an invitation email. The new member sets a password from the link, then signs in with the current access code."
-          confirmLabel="Send Official Invite"
+          title="Add New Staff Member"
+          message="Creates the account with the password you set. Share it securely along with the current access code; they can change it from Settings."
+          confirmLabel="Create Account"
           confirmVariant="primary"
           onConfirm={handleInvite}
-          onCancel={() => setShowInviteDialog(false)}
+          onCancel={closeInviteDialog}
           loading={inviting}
         >
           <Field
@@ -386,6 +417,23 @@ export default function AdminUsersScreen() {
             onChangeText={setInviteEmail}
             placeholder="officer@mil.gov.in"
             keyboardType="email-address"
+            autoCapitalize="none"
+          />
+
+          <Field
+            label="Initial Password"
+            value={invitePassword}
+            onChangeText={setInvitePassword}
+            secureTextEntry={true}
+            autoComplete="new-password"
+            placeholder={`At least ${MIN_PASSWORD_LENGTH} characters`}
+          />
+          <Field
+            label="Confirm Password"
+            value={invitePasswordConfirm}
+            onChangeText={setInvitePasswordConfirm}
+            secureTextEntry={true}
+            autoComplete="new-password"
           />
 
           <Select

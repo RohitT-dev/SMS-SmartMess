@@ -17,6 +17,7 @@ const LABELS: Record<string, string> = {
   permissions_updated: 'Permissions changed',
   user_deactivated: 'User deactivated',
   user_invited: 'User invited',
+  user_created: 'User account created',
   device_revoked: 'Device revoked',
   screen_view: 'Screen viewed',
   'bookings.create': 'Booking created (client)',

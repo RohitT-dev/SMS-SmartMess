@@ -138,14 +138,14 @@ Public sign-up is disabled, so the first account is created by hand once per dat
    ON CONFLICT (id) DO UPDATE SET role = 'admin';
    ```
 3. Start the app (`pnpm web`), sign in, and set the first access code when asked. That creates the team encryption key.
-4. Invite everyone else from **User Directory** (this needs the `invite-user` edge function deployed).
+4. Add everyone else from **User Directory** (this needs the `invite-user` edge function deployed). You set their email and password; no email is sent. They can change it later under **Settings → Change password**.
 
 ### Joining an existing project (teammates)
 Someone joining a team that already runs Smart Mess does **not** set up a database. They connect to yours:
 1. Run the installer **without** `--local-db` / `-LocalDb`.
 2. Put the two public values in their `.env`: `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_KEY`. Send them by any private channel. These values are public by design (they are built into the app) and give no access to data on their own.
 3. **Never send `SUPABASE_SERVICE_ROLE_KEY` or the database password.** The service role key bypasses every security rule. Remove it from the file before sharing; if it leaks, rotate it under Project Settings → API.
-4. An Administrator invites them from **User Directory** (needs the `invite-user` edge function deployed) and gives them the current access code separately.
+4. An Administrator adds them from **User Directory** (needs the `invite-user` edge function deployed) with a password, and gives them the current access code separately.
 
 To see anything, each person needs their own account **and** the access code.
 
@@ -277,7 +277,7 @@ Optional sample data: `pnpm seed:dev` (needs `SUPABASE_SERVICE_ROLE_KEY`).
 supabase login
 supabase link --project-ref <your-project-id>
 supabase db push                         # apply all migrations
-supabase functions deploy invite-user    # user invitations
+supabase functions deploy invite-user    # admin creates staff accounts
 ```
 Copy the project URL and anon/publishable key from **Project Settings → API** into `.env`.
 

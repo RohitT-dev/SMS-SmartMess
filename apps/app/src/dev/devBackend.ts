@@ -1559,7 +1559,7 @@ export function createDevSupabase(mode: 'auto' | 'mock') {
           updated_at: nowIso(),
           email,
         });
-        audit('user_invited', 'profiles', id, { role: opts.body?.role ?? 'clerk' });
+        audit('user_created', 'profiles', id, { role: opts.body?.role ?? 'clerk' });
         persist();
         return { data: { userId: id }, error: null };
       },
