@@ -141,10 +141,8 @@ export default function DashboardScreen() {
     };
   }, [queryClient]);
 
-  // Filter rooms. The inventory lists occupied rooms only, shared or not; vacant and
-  // out-of-service rooms are counted in the summary strip above.
+  // Filter rooms
   const filteredRooms = (roomStates || []).filter((r: any) => {
-    if (!(r.beds_taken > 0)) return false;
     if (typeFilter !== 'ALL' && r.room_type !== typeFilter) return false;
     if (statusFilter !== 'ALL' && r.status !== statusFilter) return false;
     return true;
@@ -230,9 +228,11 @@ export default function DashboardScreen() {
               selectedValue={statusFilter}
               onValueChange={setStatusFilter}
               options={[
-                { label: 'All Occupied', value: 'ALL' },
+                { label: 'All Statuses', value: 'ALL' },
+                { label: 'Free', value: 'free' },
                 { label: '1 Bed Free', value: 'one_bed_free' },
                 { label: 'Full', value: 'full' },
+                { label: 'Out of Service', value: 'out_of_service' },
               ]}
             />
           </View>
@@ -284,8 +284,8 @@ export default function DashboardScreen() {
         </View>
       ) : filteredRooms.length === 0 ? (
         <EmptyState
-          title="No occupied rooms match these filters"
-          description="Only occupied rooms are listed. Change the day, room type or availability filter to see more."
+          title="No rooms match these filters"
+          description="Change the day, room type or availability filter to see more rooms."
         />
       ) : view === 'map' ? (
         <RoomBedMap
