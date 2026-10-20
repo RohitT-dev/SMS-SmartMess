@@ -6,7 +6,11 @@ interface InvitePayload {
   role: 'admin' | 'clerk';
   displayNameEnc?: string;
   permissions?: string[];
+  // Initial password chosen by the admin; the user can change it from Settings.
+  password: string;
 }
+
+const MIN_PASSWORD_LENGTH = 12;
 
 const DEFAULT_CLERK_PERMISSIONS = [
   'create_booking',
@@ -116,16 +120,28 @@ serve(async (req: Request) => {
       });
     }
 
-    // 1. Invite user via Supabase Auth Admin API
-    const { data: inviteData, error: inviteError } = await adminClient.auth.admin.inviteUserByEmail(email);
-    if (inviteError || !inviteData?.user) {
-      return new Response(JSON.stringify({ error: inviteError?.message || 'Failed to send invite' }), {
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      return new Response(
+        JSON.stringify({ error: `Password must be at least ${MIN_PASSWORD_LENGTH} characters` }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      );
+    }
+
+    // 1. Create the auth user with the admin-chosen password. No email is sent.
+    const { data: created, error: createError } = await adminClient.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true
+    });
+    if (createError || !created?.user) {
+      return new Response(JSON.stringify({ error: createError?.message || 'Failed to create user' }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
       });
     }
 
-    const newUserId = inviteData.user.id;
+    const newUserId = created.user.id;
     const permissions =
       role === 'admin'
         ? [
@@ -149,6 +165,8 @@ serve(async (req: Request) => {
     });
 
     if (insertProfileError) {
+      // Roll back the auth user so the admin can retry with the same email.
+      await adminClient.auth.admin.deleteUser(newUserId);
       return new Response(JSON.stringify({ error: insertProfileError.message }), {
         status: 500,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -158,7 +176,7 @@ serve(async (req: Request) => {
     // 3. Write immutable audit log event (service role has no AAL2 session, so use
     // the internal helper directly; log_event would reject it)
     await adminClient.rpc('log_audit_event', {
-      p_action: 'user_invited',
+      p_action: 'user_created',
       p_entity: 'profiles',
       p_entity_id: newUserId,
       p_meta: {

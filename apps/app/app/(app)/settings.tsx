@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useQuery } from '@tanstack/react-query';
@@ -8,12 +8,16 @@ import { Screen } from '../../src/ui/primitives/Screen';
 import { Card } from '../../src/ui/primitives/Card';
 import { Button } from '../../src/ui/primitives/Button';
 import { Select } from '../../src/ui/primitives/Select';
+import { Field } from '../../src/ui/primitives/Field';
+import { Banner } from '../../src/ui/primitives/Banner';
 import { Badge } from '../../src/ui/primitives/Badge';
 import { Table } from '../../src/ui/primitives/Table';
 import { spacing, typography } from '../../src/ui/tokens';
 import { supabase } from '../../src/lib/supabase';
 import { logAction } from '../../src/lib/activityLog';
 import { fetchAccessStatus, signOut } from '../../src/features/auth/authFlow';
+
+const MIN_PASSWORD_LENGTH = 12;
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -50,6 +54,38 @@ export default function SettingsScreen() {
       refetchDevices();
     } catch (err: any) {
       alert('Failed to revoke device: ' + err.message);
+    }
+  };
+
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [savingPassword, setSavingPassword] = useState(false);
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordNotice, setPasswordNotice] = useState<string | null>(null);
+
+  const handleChangePassword = async () => {
+    setPasswordError(null);
+    setPasswordNotice(null);
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      setPasswordError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError('Passwords do not match');
+      return;
+    }
+    try {
+      setSavingPassword(true);
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      if (error) throw error;
+      logAction('auth.password_change');
+      setNewPassword('');
+      setConfirmPassword('');
+      setPasswordNotice('Password updated. Use it the next time you sign in.');
+    } catch (err: any) {
+      setPasswordError(err.message || 'Could not update password');
+    } finally {
+      setSavingPassword(false);
     }
   };
 
@@ -142,6 +178,40 @@ export default function SettingsScreen() {
             />
 
             <Button label="Sign Out & Lock Device" variant="destructive" onPress={handleSignOut} />
+          </View>
+        </Card>
+
+        {/* Change Password */}
+        <Card style={{ marginTop: spacing.md }}>
+          <Text style={[styles.title, { color: colors.navy }]}>Change password</Text>
+          <Text style={[styles.subtitle, { color: colors.muted }]}>
+            Replace the password you sign in with, including one set by an administrator.
+          </Text>
+
+          <View style={{ marginTop: spacing.sm }}>
+            {passwordError ? <Banner type="error" message={passwordError} /> : null}
+            {passwordNotice ? <Banner type="success" message={passwordNotice} /> : null}
+            <Field
+              label="New Password"
+              value={newPassword}
+              onChangeText={setNewPassword}
+              secureTextEntry={true}
+              autoComplete="new-password"
+              placeholder={`At least ${MIN_PASSWORD_LENGTH} characters`}
+            />
+            <Field
+              label="Confirm New Password"
+              value={confirmPassword}
+              onChangeText={setConfirmPassword}
+              secureTextEntry={true}
+              autoComplete="new-password"
+            />
+            <Button
+              label="Update Password"
+              variant="primary"
+              onPress={handleChangePassword}
+              loading={savingPassword}
+            />
           </View>
         </Card>
 
